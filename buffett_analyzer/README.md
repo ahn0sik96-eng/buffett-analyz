@@ -1,0 +1,99 @@
+# 버핏·멍거식 우량기업 분석기 (buffett_analyzer)
+
+워런 버핏·찰리 멍거의 투자 철학을 정량화해, 티커를 입력하면 해당 기업의
+**장기 복리 투자 적합성**을 평가하는 Streamlit 프로그램입니다.
+데이터 수집 → 정제 → 계산 → 점수화 → 해석 → 적정가치 평가까지 수행합니다.
+
+> 현재 버전: **MVP (명세 23장 1~3단계 + 재투자·역산DCF·엑셀 다운로드 선반영)**
+
+## 주요 기능
+- 미국 티커(`AAPL`, `V` 등)·한국 6자리 코드(`005930` → .KS/.KQ 자동 판별) 분석
+- ROIC(NOPAT/투하자본, A·B 이중 산정 + 괴리 경고, 마진×회전율 분해)
+- FCF(마진·CAGR·현금전환율·주당 FCF·주식보상 조정 FCF·주식수 변화)
+- 재투자율·증분 ROIC(신뢰불가 가드)·지속가능성장률·4사분면 판정
+- 부채 안전성(순부채/EBITDA·이자보상·유동성 3종·Altman Z·Piotroski F)
+- 상대가치 배수 + 무위험수익률 스프레드
+- DCF 3시나리오(보수/기준/낙관) · WACC×g 민감도 · **역산 DCF(내재 성장률)**
+- 100점 체계 채점(미구현 항목 N/A 후 환산) · 등급 · 명세 2장 7분류
+- 적색 경고 시스템(명세 10장 계산 가능 12종) · 감점(−10 하한, 데이터부족 −5)
+- 서술형 해석(수준·추세·긍정·부정·불확실성·결론) · 매수가격 6구간
+- Excel 보고서 다운로드(12시트, 원천 데이터·가정 포함)
+
+## 설치
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+```
+Python 3.11+ 권장(3.12에서 테스트됨).
+
+## API 키 설정
+MVP는 **키 없이** yfinance만으로 동작합니다. 5단계(SEC/OpenDART 10개년) 확장용으로
+`.env.example`을 `.env`로 복사해 두면 됩니다.
+
+## 실행
+```bash
+streamlit run app.py
+```
+좌측 사이드바에서 티커 입력 → 가정(무위험수익률·ERP·성장률·안전마진) 조정 → **분석 실행**.
+
+- **미국 주식**: `AAPL`, `MSFT`, `V`, `MA`, `AXP` …
+- **한국 주식**: `005930`, `000660`, `058470`(코스닥 자동 재시도) 또는 대표 종목명(`삼성전자` 등)
+- **Excel 업로드**: 14장 기능은 5단계에서 추가 예정(현재는 자동 수집만)
+
+## 핵심 계산 공식
+| 항목 | 공식 |
+|---|---|
+| NOPAT | EBIT × (1 − 유효세율), 유효세율 = 법인세/세전이익 (0~45% 클립, 불가 시 대체세율) |
+| 투하자본 A | 총자산 − 현금성자산 − (유동부채 − 단기차입금) |
+| 투하자본 B | 자기자본 + 이자부부채 − 현금성자산 (A/B 괴리 25%↑ 경고) |
+| ROIC | NOPAT / 투하자본 (분모 ≤ 0 → N/A) |
+| FCF | 영업활동현금흐름 − |CAPEX| |
+| 현금전환율 | FCF / 순이익 |
+| 재투자율 | (CAPEX − 감가상각 + ΔWC + M&A) / NOPAT, 보조식 1 − 배당·자사주/순이익 |
+| 증분 ROIC | ΔNOPAT / ΔIC (ΔIC가 IC의 5% 미만·음수 → 신뢰불가) |
+| WACC | E/(E+D)·(rf+β·ERP) + D/(E+D)·Kd·(1−t), β 0.4~2.5, WACC 하한 5% |
+| DCF | 기준 FCF를 g₁로 5년 성장 + 종가치 FCF₅(1+g)/(WACC−g), WACC−g ≥ 1.5%p 강제 |
+| 역산 DCF | 현 주가 = 모형가가 되는 g₁을 이분법으로 역산 |
+
+## 점수 기준 (명세 9장)
+ROIC 20 · FCF 15 · 재투자 15 · 해자 15 · 부채 10 · 경기방어 10 · 밸류에이션 15 = 100.
+해자·경기민감도는 4단계 구현 전까지 **N/A → 가용 배점 기준 100점 환산**(화면에 명시).
+감점: 적색 경고 합산 −10점 하한 + 데이터 부족(5개년 미만) −5점.
+등급: 90 S / 80 A / 70 B / 60 C / 50 D / 미만 회피 권고. **질 점수와 밸류에이션 점수는 분리 표기.**
+
+## 데이터 한계 (중요)
+- yfinance 연간 재무제표는 통상 **최근 4~5개 회계연도**만 제공합니다 → 대부분 종목에서
+  "5개년 미만" 신뢰도 경고와 −5점이 표시되는 것이 **정상 동작**입니다.
+  10개년 분석은 5단계 SEC EDGAR / OpenDART 연동에서 지원합니다.
+- 일회성 항목 조정(명세 4.3)은 공시 원문이 필요해 5단계에서 구현합니다(현재는 보고치 기준).
+- 금융회사는 일반 ROIC 모델이 부적절 → 감지 시 경고 + ROE 참고치만 표시(전용 모델 5단계).
+- 야후 `info` 필드는 간헐적으로 누락됩니다 → 다중 fallback 후에도 없으면 N/A.
+
+## 알려진 오류·주의
+- 티커별로 야후 행 이름이 다를 수 있어 일부 항목이 N/A가 될 수 있습니다(별칭 테이블 확장으로 대응).
+- ADR·통화 불일치 종목은 배수 해석에 왜곡 가능(경고 표시).
+- 리스 회계로 IC A/B가 크게 벌어질 수 있음(경고 표시, 방식 수동 선택 가능).
+- 야후 서버 일시 차단(rate limit) 시 잠시 후 재시도하세요(1시간 캐시 적용).
+
+## 테스트
+```bash
+pytest tests/ -v     # NOPAT·IC·ROIC·FCF·전환율·재투자·증분ROIC·WACC·DCF·역산·점수 검증 (14 tests)
+```
+
+## 프로젝트 구조
+```
+app.py                  # Streamlit 진입점 (화면 1~10 중 MVP 8탭)
+config/    settings.py scoring_rules.py
+data/      data_fetcher.py data_validator.py        # (5단계: sec/dart/market/macro)
+analysis/  roic.py cashflow.py reinvestment.py debt.py valuation.py
+models/    wacc.py dcf.py                            # (역산 DCF 포함)
+scoring/   quality_score.py valuation_score.py risk_penalties.py final_score.py
+reports/   narrative_report.py excel_report.py       # (6단계: pdf_report)
+ui/        charts.py formatting.py
+tests/     test_roic / cashflow / reinvestment / dcf / scoring
+```
+
+## 면책조항
+본 프로그램은 공개 데이터 기반 자동 계산 도구이며 **투자 자문·매수/매도 권유가 아닙니다**.
+데이터 오류·지연·누락이 있을 수 있고, 모든 투자 판단과 결과의 책임은 사용자 본인에게 있습니다.
+확인된 사실·계산 결과·시장 추정치·프로그램의 추론을 구분해 표기하며, 산출 불가 값은 N/A로 처리합니다.
