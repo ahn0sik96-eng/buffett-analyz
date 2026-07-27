@@ -62,6 +62,27 @@ KR_NAME_MAP = {
     "KB금융": "105560", "신한지주": "055550", "리노공업": "058470",
 }
 
+# ── SEC EDGAR (미국 재무제표 장기 이력) ─────────────────────────────────────
+SEC_ENABLED = True
+SEC_MIN_YEARS = 5          # 이보다 적게 나오면 야후 데이터를 유지
+# EDGAR는 User-Agent에 실제 연락처를 요구한다(없으면 403).
+# 코드에 직접 적지 말고 Streamlit Secrets에 SEC_USER_AGENT로 넣을 것.
+SEC_USER_AGENT_FALLBACK = ""
+
+
+def sec_user_agent() -> str:
+    """Streamlit Secrets → 환경변수 → 폴백 순으로 EDGAR User-Agent를 찾는다."""
+    import os
+    try:
+        import streamlit as st
+        v = st.secrets.get("SEC_USER_AGENT", "")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return os.environ.get("SEC_USER_AGENT", "") or SEC_USER_AGENT_FALLBACK
+
+
 FINANCIAL_SECTORS = {"Financial Services", "Financial"}
 FINANCIAL_KEYWORDS = ("bank", "insurance", "capital markets", "credit")
 
