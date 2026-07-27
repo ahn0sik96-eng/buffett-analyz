@@ -48,7 +48,9 @@ TAGS: dict[str, tuple[str, list[str]]] = {
     "net_income": ("d", ["NetIncomeLoss", "ProfitLoss"]),
     "interest_expense": ("d", [
         "InterestExpense", "InterestExpenseDebt",
-        "InterestExpenseNonoperating"]),
+        "InterestExpenseNonOperating", "InterestExpenseNonoperating",
+        "InterestAndDebtExpense",
+        "InterestExpenseDebtAndCapitalLeaseObligations"]),
     "diluted_shares": ("d", ["WeightedAverageNumberOfDilutedSharesOutstanding"]),
 
     "total_assets": ("i", ["Assets"]),
