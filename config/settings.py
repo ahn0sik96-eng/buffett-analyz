@@ -83,6 +83,25 @@ def sec_user_agent() -> str:
     return os.environ.get("SEC_USER_AGENT", "") or SEC_USER_AGENT_FALLBACK
 
 
+# ── DART OpenAPI (국내 재무제표) ────────────────────────────────────────────
+DART_ENABLED = True
+DART_MIN_YEARS = 5         # 이보다 적게 나오면 야후 데이터를 유지
+DART_YEARS_BACK = 12
+
+
+def dart_api_key() -> str:
+    """키는 코드에 두지 말고 Streamlit Secrets(DART_API_KEY)에 저장할 것."""
+    import os
+    try:
+        import streamlit as st
+        v = st.secrets.get("DART_API_KEY", "")
+        if v:
+            return str(v)
+    except Exception:
+        pass
+    return os.environ.get("DART_API_KEY", "")
+
+
 FINANCIAL_SECTORS = {"Financial Services", "Financial"}
 FINANCIAL_KEYWORDS = ("bank", "insurance", "capital markets", "credit")
 
