@@ -178,13 +178,33 @@ def _ttm(tk: yf.Ticker) -> dict | None:
 
 
 def _safe_info(tk: yf.Ticker) -> dict:
-    try:
-        return tk.get_info() or {}
-    except Exception:
-        try:
-            return tk.info or {}
-        except Exception:
-            return {}
+    """야후 info. 간헐적으로 빈 dict가 오므로 1회 재시도한다."""
+    import time as _t
+    for attempt in range(2):
+        for getter in ("get_info", "info"):
+            try:
+                v = getattr(tk, getter)
+                v = v() if callable(v) else v
+                if v:
+                    return v
+            except Exception:
+                continue
+        if attempt == 0:
+            _t.sleep(0.6)
+    return {}
+
+
+def _carry_shares(new_df: pd.DataFrame, old_df: pd.DataFrame) -> pd.DataFrame:
+    """EDGAR/DART 데이터로 교체할 때 야후에만 있는 주식수 항목을 넘겨받는다.
+
+    DART 표준계정에는 발행주식수가 없어서, 이걸 빠뜨리면 주당 적정가치가
+    통째로 N/A가 된다(야후 info까지 비면 대체 경로가 사라짐)."""
+    out = new_df.copy()
+    for c in _SHARE_COUNT_COLS:
+        if c in old_df.columns and (c not in out.columns
+                                    or out[c].isna().all()):
+            out[c] = old_df[c].reindex(out.index)
+    return out
 
 
 def _get_price(tk: yf.Ticker, info: dict) -> float | None:
@@ -244,6 +264,15 @@ def _fx_rate(fin_currency: str, currency: str) -> float | None:
 _SHARE_COUNT_COLS = {"shares_out", "diluted_shares"}
 
 
+def _kr_name(tick: str) -> str | None:
+    """005930.KS → '삼성전자'. 야후 info가 비었을 때 이름이라도 살린다."""
+    code = re.sub(r"\D", "", tick)[:6]
+    for nm, c in settings.KR_NAME_MAP.items():
+        if c == code:
+            return nm
+    return None
+
+
 def _normalize_currency(annual: pd.DataFrame, ttm: dict | None,
                         fin_currency: str | None, currency: str | None,
                         msgs: list[str]) -> tuple[pd.DataFrame, dict | None]:
@@ -288,7 +317,7 @@ def fetch(user_input: str) -> FinancialData:
                     from data import sec_fetcher
                     sec_df, sec_msg = sec_fetcher.fetch_annual(tick)
                     if len(sec_df) >= max(settings.SEC_MIN_YEARS, len(annual)):
-                        annual = _derive(sec_df)
+                        annual = _derive(_carry_shares(sec_df, annual))
                         source = "SEC EDGAR (재무) + Yahoo Finance (주가·정보)"
                         msgs.append(sec_msg)
                     else:
@@ -306,7 +335,7 @@ def fetch(user_input: str) -> FinancialData:
                     dart_df, dart_msg = dart_fetcher.fetch_annual(
                         code, years_back=settings.DART_YEARS_BACK)
                     if len(dart_df) >= max(settings.DART_MIN_YEARS, len(annual)):
-                        annual = _derive(dart_df)
+                        annual = _derive(_carry_shares(dart_df, annual))
                         source = "DART OpenAPI (재무) + Yahoo Finance (주가·정보)"
                         msgs.append(dart_msg)
                     else:
@@ -319,6 +348,11 @@ def fetch(user_input: str) -> FinancialData:
             price = _get_price(tk, info)
             shares = info.get("sharesOutstanding")
             if not shares:
+                try:
+                    shares = tk.fast_info.get("shares")
+                except Exception:
+                    shares = None
+            if not shares:
                 so = _g(annual, "shares_out").dropna()
                 shares = float(so.iloc[-1]) if len(so) else None
                 if shares:
@@ -327,6 +361,10 @@ def fetch(user_input: str) -> FinancialData:
             if not mcap and price and shares:
                 mcap = price * shares
 
+            if not info:
+                msgs.append("야후 종목정보(섹터·통화·발행주식수) 조회 실패 — "
+                            "일시적 장애일 수 있습니다. 사이드바의 '데이터 캐시 "
+                            "지우기' 후 재시도해 보세요.")
             sector = info.get("sector")
             industry = (info.get("industry") or "")
             is_fin = (sector in settings.FINANCIAL_SECTORS) or any(
@@ -334,6 +372,15 @@ def fetch(user_input: str) -> FinancialData:
 
             fin_ccy = info.get("financialCurrency")
             ccy = info.get("currency")
+            if not ccy:
+                try:
+                    ccy = tk.fast_info.get("currency")
+                except Exception:
+                    ccy = None
+            if not ccy:
+                ccy = "KRW" if tick.endswith((".KS", ".KQ")) else None
+            if not fin_ccy:
+                fin_ccy = ccy
             ttm_raw = _ttm(tk)
             fx_adjusted = bool(fin_ccy and ccy and fin_ccy != ccy)
             annual, ttm_raw = _normalize_currency(annual, ttm_raw, fin_ccy, ccy, msgs)
@@ -347,7 +394,8 @@ def fetch(user_input: str) -> FinancialData:
 
             return FinancialData(
                 ticker=tick,
-                name=info.get("longName") or info.get("shortName") or tick,
+                name=(info.get("longName") or info.get("shortName")
+                      or _kr_name(tick) or tick),
                 currency=ccy,
                 fin_currency=fin_ccy,
                 price=price, market_cap=mcap,
