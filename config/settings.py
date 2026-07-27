@@ -1,6 +1,6 @@
 """전역 설정값. UI에서 대부분 재정의 가능."""
 
-APP_VERSION = "v1.4 (2026-07-27) · 금리자동·국가별가정·금융업모델"
+APP_VERSION = "v1.5 (2026-07-27) · EDGAR·DART·사이클정규화·금융업모델"
 
 TARGET_YEARS = 10          # 목표 분석 기간
 MIN_YEARS = 5              # 이 미만이면 신뢰도 경고 + 데이터 부족 감점
@@ -10,10 +10,12 @@ MIN_YEARS = 5              # 이 미만이면 신뢰도 경고 + 데이터 부�
 DEFAULT_RF = {"US": 0.046, "KR": 0.044, "OTHER": 0.042}
 
 # FRED 시계열 ID (무인증 CSV 엔드포인트 사용)
-#   DGS10           : 미 국채 10년물, 일별
-#   IRLTLT01KRM156N : 한국 장기국채 수익률(OECD), 월별 — 1~2개월 시차 있음
+#   DGS10 : 미 국채 10년물, 일별 — 정상 동작
+# 한국(IRLTLT01KRM156N, OECD 월별)은 응답이 없어 제외했다. OECD MEI 계열은
+# 2024년경 상당수가 중단됐고, 재시도까지 붙으면 조회당 24초를 낭비한다.
+# 국고채 10년물은 수동 입력이 더 빠르고 정확하다.
 RF_AUTO_ENABLED = True
-RF_SOURCES = {"US": "DGS10", "KR": "IRLTLT01KRM156N"}
+RF_SOURCES = {"US": "DGS10"}
 RF_SANE_RANGE = (0.001, 0.20)   # 이 범위를 벗어난 조회값은 폐기하고 폴백 사용
 RF_CACHE_TTL = 6 * 3600
 
