@@ -208,6 +208,26 @@ def _usable_years(df: pd.DataFrame) -> int:
     return int(df[cols].notna().all(axis=1).sum())
 
 
+def _merge_ttm(base: dict | None, override: dict | None) -> dict | None:
+    """1차 소스(EDGAR/DART) TTM으로 야후 TTM을 항목별 대체.
+
+    야후에만 있는 항목(sbc 등)은 남기고, 겹치는 항목은 1차 소스를 쓴다.
+    fcf는 병합 후 재계산해 ocf·capex와의 정합을 보장한다."""
+    if not override:
+        return base
+    out = dict(base or {})
+    for k, v in override.items():
+        try:
+            if v is not None and np.isfinite(v):
+                out[k] = v
+        except TypeError:
+            continue
+    ocf, cap = out.get("ocf"), out.get("capex_out")
+    if ocf is not None and cap is not None             and np.isfinite(ocf) and np.isfinite(cap):
+        out["fcf"] = ocf - cap
+    return out or None
+
+
 def _carry_shares(new_df: pd.DataFrame, old_df: pd.DataFrame) -> pd.DataFrame:
     """EDGAR/DART 데이터로 교체할 때 야후에만 있는 주식수 항목을 넘겨받는다.
 
@@ -322,6 +342,8 @@ def fetch(user_input: str) -> FinancialData:
             info = _safe_info(tk)
             msgs: list[str] = []
             source = "Yahoo Finance"
+            ttm_override: dict | None = None
+            ttm_src_msg: str | None = None
 
             # ── 미국 종목: EDGAR로 장기 이력 교체 시도 ──────────────────────
             # 야후는 연간 4개년뿐이라 시클리컬 종목의 정상이익 추정이 불가능하다.
@@ -329,12 +351,15 @@ def fetch(user_input: str) -> FinancialData:
             if country == "US" and settings.SEC_ENABLED:
                 try:
                     from data import sec_fetcher
-                    sec_df, sec_msg = sec_fetcher.fetch_annual(tick)
+                    sec_df, sec_msg, sec_ttm, sec_ttm_msg = \
+                        sec_fetcher.fetch_annual_and_ttm(tick)
                     u_new, u_old = _usable_years(sec_df), _usable_years(annual)
                     if u_new >= max(settings.SEC_MIN_YEARS, u_old):
                         annual = _derive(_carry_shares(sec_df, annual))
                         source = "SEC EDGAR (재무) + Yahoo Finance (주가·정보)"
                         msgs.append(sec_msg)
+                        if sec_ttm:
+                            ttm_override, ttm_src_msg = sec_ttm, sec_ttm_msg
                     else:
                         msgs.append(
                             f"EDGAR 가용연수 {u_new}년(매출·현금흐름·CAPEX "
@@ -356,6 +381,13 @@ def fetch(user_input: str) -> FinancialData:
                         annual = _derive(_carry_shares(dart_df, annual))
                         source = "DART OpenAPI (재무) + Yahoo Finance (주가·정보)"
                         msgs.append(dart_msg)
+                        try:
+                            fy_last = int(dart_df.index.max())
+                            ttm_override, ttm_src_msg = dart_fetcher.fetch_ttm(
+                                code, fy_last, dart_df.loc[fy_last].to_dict())
+                        except Exception as e:
+                            msgs.append(f"DART 분기 TTM 조회 실패"
+                                        f"({type(e).__name__}) — 야후 TTM 유지")
                     else:
                         msgs.append(
                             f"DART 가용연수 {u_new}년(매출·현금흐름·CAPEX "
@@ -401,7 +433,9 @@ def fetch(user_input: str) -> FinancialData:
                 ccy = "KRW" if tick.endswith((".KS", ".KQ")) else None
             if not fin_ccy:
                 fin_ccy = ccy
-            ttm_raw = _ttm(tk)
+            ttm_raw = _merge_ttm(_ttm(tk), ttm_override)
+            if ttm_src_msg:
+                msgs.append(ttm_src_msg)
             fx_adjusted = bool(fin_ccy and ccy and fin_ccy != ccy)
             annual, ttm_raw = _normalize_currency(annual, ttm_raw, fin_ccy, ccy, msgs)
 

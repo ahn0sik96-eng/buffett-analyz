@@ -33,6 +33,8 @@ CORP_CODE_URL = f"{BASE}/corpCode.xml"
 FNLTT_URL = f"{BASE}/fnlttSinglAcntAll.json"
 
 REPRT_ANNUAL = "11011"          # 사업보고서
+# 분기 TTM용 — 제출된 가장 최신 보고서를 앞에서부터 시도
+REPRT_QUARTERS = [("11014", "3분기"), ("11012", "반기"), ("11013", "1분기")]
 DART_FIRST_YEAR = 2015          # API 제공 시작 사업연도
 
 STATUS_MSG = {
@@ -216,6 +218,108 @@ def _parse_report(items: list[dict], year: int) -> dict[int, dict[str, float]]:
                 out[y]["total_debt"] = out[y].get("total_debt", 0.0) + v
 
     return {y: d for y, d in out.items() if d}
+
+
+# ── 분기 TTM ────────────────────────────────────────────────────────────────
+_FLOW_TTM = ("revenue", "operating_income", "net_income", "ocf", "capex",
+             "depreciation")
+
+
+def _fetch_items(corp: str, year: int, reprt: str, fs_div: str) -> list[dict]:
+    js = _get(FNLTT_URL, {"crtfc_key": api_key(), "corp_code": corp,
+                          "bsns_year": str(year), "reprt_code": reprt,
+                          "fs_div": fs_div}).json()
+    _check(js)
+    return js.get("list") or []
+
+
+def _ytd_flows(items: list[dict]) -> dict[str, float]:
+    """분기·반기보고서에서 누적(YTD) 흐름 항목 추출.
+
+    누적값 우선순위: thstrm_add_amount(손익 누적) → thstrm_amount.
+    손익계산서는 반기·3분기 보고서에서 thstrm_amount가 '해당 3개월'이고
+    누적은 add_amount에 있다. 현금흐름표는 누적만 공시되므로
+    thstrm_amount가 곧 누적이고 add_amount는 비어 있다 — 이 우선순위가
+    두 경우를 모두 맞게 처리한다.
+    """
+    out: dict[str, float] = {}
+    for f in _FLOW_TTM:
+        ids, names = TAGS[f]
+        for it in items:
+            if (it.get("sj_div") or "").upper() in ("BS", "SCE"):
+                continue
+            if not _match(it, ids, names):
+                continue
+            v = _amt(it.get("thstrm_add_amount"))
+            if not np.isfinite(v):
+                v = _amt(it.get("thstrm_amount"))
+            if np.isfinite(v):
+                out[f] = v
+            break
+    return out
+
+
+def _assemble_ttm(fy_flows: dict, cur: dict, prv: dict) -> dict | None:
+    """TTM = 직전 FY + 당기 누적 − 전년 동기 누적. 야후 ttm dict 키로 반환."""
+    key_map = {"operating_income": "ebit"}
+    vals: dict[str, float] = {}
+    for f in _FLOW_TTM:
+        a, b, q = fy_flows.get(f), cur.get(f), prv.get(f)
+        if all(x is not None and np.isfinite(x) for x in (a, b, q)):
+            vals[key_map.get(f, f)] = float(a) + float(b) - float(q)
+    if "ocf" not in vals or "capex" not in vals:
+        return None                    # FCF를 못 만들면 TTM 교체 의미 없음
+    out = {k: v for k, v in vals.items()
+           if k not in ("capex", "depreciation")}
+    out["capex_out"] = abs(vals["capex"])
+    out["fcf"] = out["ocf"] - out["capex_out"]
+    if np.isfinite(vals.get("ebit", np.nan)) and             np.isfinite(vals.get("depreciation", np.nan)):
+        out["ebitda"] = vals["ebit"] + abs(vals["depreciation"])
+    return out
+
+
+def fetch_ttm(stock_code: str, fy_year: int, fy_flows: dict
+              ) -> tuple[dict | None, str | None]:
+    """최신 분기·반기보고서 기준 TTM. 실패 시 (None, None) — 야후 TTM 유지.
+
+    3분기 → 반기 → 1분기 순으로 시도해 '제출된 가장 최신 보고서'를 자동
+    선택한다. 반기보고서 법정기한이 8월 중순이라 7월에는 1분기가 최신이고,
+    반기가 제출되는 즉시 코드 수정 없이 반기 기준으로 넘어간다.
+    전년 동기는 같은 reprt_code·fs_div로 별도 조회한다 — 현재 보고서의
+    frmtrm 칼럼은 보고서 유형에 따라 의미가 달라 신뢰할 수 없다.
+    """
+    corp = get_corp_code(stock_code)
+    if corp is None:
+        return None, None
+    cur_year = fy_year + 1
+    cur_items, used_div, used_label = None, None, None
+    for reprt, label in REPRT_QUARTERS:
+        for fs_div in ("CFS", "OFS"):
+            try:
+                items = _fetch_items(corp, cur_year, reprt, fs_div)
+            except Exception:
+                continue
+            if items:
+                cur_items, used_div, used_label = items, fs_div, label
+                used_reprt = reprt
+                break
+        if cur_items:
+            break
+        time.sleep(0.1)
+    if not cur_items:
+        return None, None
+    try:
+        prv_items = _fetch_items(corp, fy_year, used_reprt, used_div)
+    except Exception:
+        return None, None
+    if not prv_items:
+        return None, None
+    out = _assemble_ttm(fy_flows, _ytd_flows(cur_items), _ytd_flows(prv_items))
+    if out is None:
+        return None, None
+    msg = (f"TTM 갱신: FY{fy_year} + {cur_year} {used_label} 누적 − "
+           f"{fy_year} 동기 (DART {used_label}보고서·{used_div})")
+    return out, msg
 
 
 def fetch_annual(stock_code: str, years_back: int = 12

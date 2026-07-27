@@ -227,8 +227,86 @@ def build_annual(facts: dict) -> pd.DataFrame:
     return df.drop(columns=[c for c in df.columns if c.startswith("_")])
 
 
-def fetch_annual(ticker: str) -> tuple[pd.DataFrame, str]:
-    """티커 → (연간 재무 DataFrame, 안내 메시지). 실패 시 예외."""
+def _dur_days(e: dict) -> int | None:
+    try:
+        return (dt.date.fromisoformat(e["end"])
+                - dt.date.fromisoformat(e["start"])).days
+    except Exception:
+        return None
+
+
+def _ttm_one(rows: list[dict]) -> tuple[float, str] | None:
+    """단일 태그의 TTM = 직전 FY + 당기 YTD − 전년 동기 YTD.
+
+    10-Q에는 3·6·9개월 YTD가 섞여 있고 Q4는 아예 없으므로(연차보고로 대체)
+    분기 4개 합산 방식은 쓸 수 없다. FY+YTD−전년동기 방식은 기간 정의만
+    맞으면 결측 분기가 없다.
+    """
+    dur = [e for e in rows
+           if e.get("start") and e.get("end") and e.get("val") is not None]
+    ann = [e for e in dur if str(e.get("form", "")).startswith("10-K")
+           and 330 <= (_dur_days(e) or 0) <= 400]
+    if not ann:
+        return None
+    fy = max(ann, key=lambda e: (e["end"], str(e.get("filed", ""))))
+    fy_end = dt.date.fromisoformat(fy["end"])
+
+    cur = [e for e in dur if dt.date.fromisoformat(e["start"]) > fy_end]
+    if not cur:                                  # 새 회계연도 10-Q 미제출
+        return None
+    ytd = max(cur, key=lambda e: (e["end"], str(e.get("filed", ""))))
+    d = _dur_days(ytd) or 0
+    ytd_end = dt.date.fromisoformat(ytd["end"])
+
+    prv = [e for e in dur
+           if abs((_dur_days(e) or 0) - d) <= 20
+           and abs((ytd_end - dt.date.fromisoformat(e["end"])).days - 365) <= 25]
+    if not prv:
+        return None
+    p = max(prv, key=lambda e: str(e.get("filed", "")))
+    return (float(fy["val"]) + float(ytd["val"]) - float(p["val"]),
+            ytd["end"])
+
+
+_TTM_FIELDS = [("revenue", "revenue"), ("operating_income", "ebit"),
+               ("net_income", "net_income"), ("ocf", "ocf"),
+               ("capex", "capex"), ("depreciation", "depreciation")]
+
+
+def build_ttm(facts: dict) -> tuple[dict | None, str | None]:
+    """companyfacts → 야후 ttm dict와 동일한 키 구조의 TTM. 실패 시 (None, None)."""
+    gaap = facts.get("us-gaap", {})
+    vals: dict[str, float] = {}
+    end: str | None = None
+    for field, key in _TTM_FIELDS:
+        _, tags = TAGS[field]
+        for tag in tags:
+            if tag not in gaap:
+                continue
+            r = _ttm_one(_units(gaap[tag]))
+            if r:
+                vals[key], e = r
+                end = max(end, e) if end else e
+                break
+    if "ocf" not in vals or "capex" not in vals:
+        return None, None                        # FCF를 못 만들면 의미 없음
+    out = {
+        "revenue": vals.get("revenue", np.nan),
+        "ebit": vals.get("ebit", np.nan),
+        "net_income": vals.get("net_income", np.nan),
+        "ocf": vals["ocf"],
+        "capex_out": abs(vals["capex"]),
+    }
+    out["fcf"] = out["ocf"] - out["capex_out"]
+    if np.isfinite(vals.get("ebit", np.nan)) and             np.isfinite(vals.get("depreciation", np.nan)):
+        out["ebitda"] = vals["ebit"] + abs(vals["depreciation"])
+    msg = f"TTM 갱신: 직전 FY + {end} 종료 YTD − 전년 동기 (EDGAR 10-Q)"
+    return out, msg
+
+
+def fetch_annual_and_ttm(ticker: str
+                         ) -> tuple[pd.DataFrame, str, dict | None, str | None]:
+    """연간 + TTM을 companyfacts 1회 호출로 함께 반환."""
     cik = get_cik(ticker)
     if cik is None:
         raise ValueError(f"{ticker}: EDGAR 티커맵에 없음(ADR·비상장 가능성)")
@@ -239,4 +317,11 @@ def fetch_annual(ticker: str) -> tuple[pd.DataFrame, str]:
     yrs = df.index.tolist()
     msg = (f"SEC EDGAR XBRL {len(yrs)}개년({min(yrs)}~{max(yrs)}) 적용 "
            f"· CIK {cik:010d} · 10-K 기준, 소급수정 반영")
+    ttm, ttm_msg = build_ttm(facts)
+    return df, msg, ttm, ttm_msg
+
+
+def fetch_annual(ticker: str) -> tuple[pd.DataFrame, str]:
+    """호환용 래퍼 — 연간만 필요할 때."""
+    df, msg, _, _ = fetch_annual_and_ttm(ticker)
     return df, msg
