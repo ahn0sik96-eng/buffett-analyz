@@ -15,7 +15,7 @@ import streamlit as st
 
 from config import settings
 from data import data_fetcher
-from analysis.roic import _g
+from data import market_rates
 from models import dcf as dcf_m
 from reports import narrative_report as nr
 from reports.excel_report import build_excel
@@ -27,10 +27,6 @@ from ui.formatting import pct, xs, money, price_fmt
 COMP_LABEL = {"roic": "ROIC", "fcf": "FCF", "reinvestment": "재투자",
               "moat": "경제적 해자", "debt": "부채·안전성",
               "cyclicality": "경기 방어력", "valuation": "밸류에이션"}
-
-# 버전은 이 파일에 직접 둔다 — 다른 파일이 구버전이어도 화면 표시가 깨지지 않도록.
-APP_VERSION = getattr(settings, "APP_VERSION",
-                      "v1.3 (2026-07-23) · 모바일·비교모드·경기방어")
 
 st.set_page_config(page_title="버핏·멍거 우량기업 분석기", page_icon="📒",
                    layout="wide", initial_sidebar_state="auto")
@@ -46,6 +42,29 @@ def load(ticker: str):
     import datetime as _dt
     fd.fetched_at = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
     return fd
+
+
+@st.cache_data(ttl=settings.RF_CACHE_TTL, show_spinner=False)
+def load_rf(country: str) -> dict:
+    """무위험수익률 자동 조회(실패 시 폴백값 + 사유). 6시간 캐시."""
+    return market_rates.fetch_rf(country)
+
+
+def guess_country(raw: str) -> str:
+    """입력값 → 국가코드. 데이터 수집기와 동일한 판별 규칙을 재사용한다.
+
+    앞 2글자에 숫자가 있는지 보는 방식은 종목명 검색('삼성전자')에서 오판하므로
+    resolve_candidates()를 그대로 쓴다. 여러 종목이 들어오면 첫 종목 기준.
+    """
+    import re as _re
+    first = next((t.strip() for t in _re.split(r"[,\n]", raw or "") if t.strip()),
+                 "")
+    if not first:
+        return "US"
+    try:
+        return data_fetcher.resolve_candidates(first)[1]
+    except Exception:
+        return "US"
 
 
 def fmt_table(df: pd.DataFrame, currency, money_cols=(), pct_cols=(),
@@ -87,25 +106,68 @@ with st.sidebar:
     st.divider()
     st.subheader("가정 (수정 가능)")
     _hint_src = ticker_in or (tickers_in or "")
-    country_hint = "KR" if _hint_src and any(
-        c.isdigit() for c in _hint_src[:2]) else "US"
-    rf = st.number_input("무위험수익률 (10년물, %)",
-                         value=settings.DEFAULT_RF.get(country_hint, 0.04) * 100,
-                         min_value=0.0, max_value=15.0, step=0.1) / 100
-    erp = st.number_input("주식위험프리미엄 (%)", value=settings.DEFAULT_ERP * 100,
-                          min_value=1.0, max_value=12.0, step=0.25) / 100
-    tax_fb = st.number_input("대체 법인세율 (%)",
-                             value=settings.TAX_FALLBACK.get(country_hint, .25) * 100,
-                             min_value=0.0, max_value=45.0, step=0.5) / 100
+    country_hint = guess_country(_hint_src)
+    # 위젯 key에 국가코드를 넣어야 종목을 바꿨을 때 기본값이 새로 반영된다
+    # (Streamlit 위젯의 value 인자는 최초 렌더에만 적용되므로).
+    _k = country_hint
+
+    rf_auto = st.checkbox("무위험수익률 자동 조회", value=True,
+                          help="FRED에서 10년물 국채 수익률을 받아옵니다. "
+                               "실패하면 기본값을 쓰고 사유를 표시합니다.")
+    if rf_auto:
+        _rfd = load_rf(country_hint)
+    else:
+        _rfd = {"rf": settings.DEFAULT_RF.get(country_hint, 0.04),
+                "auto": False, "label": "자동 조회 꺼짐 — 기본값"}
+    rf = st.number_input(
+        "무위험수익률 (10년물, %)", value=_rfd["rf"] * 100,
+        min_value=0.0, max_value=15.0, step=0.1,
+        key=f"rf_{_k}_{int(rf_auto)}_{_rfd['rf']:.4f}") / 100
+    (st.caption if _rfd["auto"] else st.warning)(
+        ("✅ " if _rfd["auto"] else "⚠️ ") + _rfd["label"])
+
+    _erp_def = settings.DEFAULT_ERP_BY_COUNTRY.get(country_hint,
+                                                   settings.DEFAULT_ERP)
+    erp = st.number_input("주식위험프리미엄 (%)", value=_erp_def * 100,
+                          min_value=1.0, max_value=12.0, step=0.25,
+                          key=f"erp_{_k}") / 100
+    tax_fb = st.number_input(
+        "대체 법인세율 (%)",
+        value=settings.TAX_FALLBACK.get(country_hint, .25) * 100,
+        min_value=0.0, max_value=45.0, step=0.5, key=f"tax_{_k}") / 100
+
+    _ke_preview = rf + erp
+    st.caption(f"→ 판별 국가 **{country_hint}** · 자기자본비용(β=1 기준) "
+               f"{pct(_ke_preview)}")
+    if _ke_preview > 0.105:
+        st.warning("무위험수익률과 ERP를 동시에 높게 잡으면 이중계상입니다 — "
+                   "금리가 오르면 실현 ERP는 압축되는 것이 정상이라, "
+                   "합계(Ke)가 9~10% 밴드에 들어오는지를 기준으로 보세요.")
     ic_method = st.selectbox("투하자본 산정", ["auto", "A", "B"],
                              help="A: 총자산−현금−무이자유동부채 / B: 자기자본+이자부부채−현금")
     fcf_base_opt = st.selectbox("DCF 기준 FCF", ["3년 중앙값", "TTM", "최근 연도"])
     g_mode = st.selectbox("1단계 성장률(5년)", ["자동(과거 FCF CAGR 기반)", "수동"])
     g_manual = st.slider("수동 성장률 (%)", -10.0, 25.0, 6.0, 0.5) / 100
-    gT = st.number_input("영구성장률 (%)", value=settings.DEFAULT_TERMINAL_G * 100,
-                         min_value=0.0, max_value=4.0, step=0.25) / 100
-    mos_target = st.slider("목표 안전마진 (%)", 10, 50,
-                           int(settings.DEFAULT_MOS_TARGET * 100), 5) / 100
+    _gT_def = settings.DEFAULT_TERMINAL_G_BY_COUNTRY.get(
+        country_hint, settings.DEFAULT_TERMINAL_G)
+    gT = st.number_input("영구성장률 (%)", value=_gT_def * 100,
+                         min_value=0.0, max_value=4.0, step=0.25,
+                         key=f"gt_{_k}",
+                         help="장기 명목 GDP 성장률을 넘을 수 없습니다. "
+                              "한국은 인구구조를 반영해 기본값이 더 낮습니다.") / 100
+
+    mos_preset = st.selectbox(
+        "목표 안전마진 프리셋", list(settings.MOS_PRESETS.keys()),
+        index=list(settings.MOS_PRESETS).index(settings.DEFAULT_MOS_PRESET),
+        help="이익 예측가능성이 낮을수록 안전마진을 높게 잡습니다. "
+             "반도체·시클리컬에 30%는 사실상 여유가 없는 수준입니다.")
+    _mos_val = settings.MOS_PRESETS[mos_preset]
+    if _mos_val is None:
+        mos_target = st.slider("목표 안전마진 (%)", 10, 60,
+                               int(settings.DEFAULT_MOS_TARGET * 100), 5) / 100
+    else:
+        mos_target = _mos_val
+        st.caption(f"목표 안전마진 {pct(mos_target, 0)} 적용")
     run = st.button("분석 실행", type="primary", use_container_width=True)
     if st.button("🔄 데이터 캐시 지우기", use_container_width=True,
                  help="최신 주가·재무를 다시 받아옵니다(1시간 캐시 무시)"):
@@ -118,7 +180,7 @@ ASSUMPTIONS = dict(rf=rf, erp=erp, tax_fb=tax_fb, ic_method=ic_method,
 
 st.title("버핏·멍거식 우량기업 분석기")
 st.caption(f"ROIC · FCF · 재투자 · 재무안전성 · 경기방어(간이) · DCF — 장기 복리 적합성 평가　|　"
-           f"**{APP_VERSION}**")
+           f"**{settings.APP_VERSION}**")
 
 if not run:
     st.info("좌측에서 모드를 고르고 티커를 입력한 뒤 **분석 실행**을 누르세요. "
@@ -149,6 +211,8 @@ if mode == "비교·워치리스트":
             r = analyze(fd, ASSUMPTIONS)
             sc = r["scores"]
             base = r["scen"]["기준"] if r["scen"] else {}
+            if not base and r.get("fin_val"):
+                base = {"mos": r["fin_val"]["summary"].get("mos")}
             rows.append({
                 "티커": fd.ticker,
                 "기업": (fd.name or "")[:22],
@@ -245,6 +309,7 @@ scen = R["scen"]; fx_sanity_msg = R["fx_sanity_msg"]; fair_base = R["fair_base"]
 sens = R["sens"]; reverse = R["reverse"]
 components = R["components"]; penalty_items = R["penalty_items"]
 scores = R["scores"]; cls = R["cls"]; concl = R["concl"]
+fin_val = R.get("fin_val")
 penalty_total = scores["penalty"]
 
 # ── 화면 2: 종합 요약 헤더 ─────────────────────────────────────────────────
@@ -279,33 +344,43 @@ for m in msgs:
     (st.error if m["level"] == "error" else
      st.warning if m["level"] == "warn" else st.caption)(m["msg"])
 
-if fd.is_financial:
-    eq_s, ni_s = _g(annual, "equity"), _g(annual, "net_income")
-    div_s = _g(annual, "dividends_out")
-    roe = (ni_s / eq_s.where(eq_s > 0)).dropna()
-    with st.container(border=True):
-        st.markdown("**🏦 금융회사 참고 패널** — 은행·보험은 ROE·자본비율(CET1)·"
-                    "순이자마진·대손비용 중심으로 평가해야 하며, 아래는 공개 데이터로 "
-                    "산출 가능한 참고치입니다(전용 모델은 5단계).")
-        if len(roe):
-            payout = (div_s / ni_s.where(ni_s > 0)).dropna()
-            mob.metric_row([
-                ("평균 ROE", pct(float(roe.mean()))),
-                ("최근 ROE", pct(float(roe.iloc[-1]))),
-                ("PBR", xs(mult["pbr"])),
-                ("평균 배당성향", pct(float(payout.mean()), 0)
-                 if len(payout) else "N/A"),
-            ], MOBILE, per_row_desktop=4)
-            fin_df = pd.DataFrame({"ROE": roe.map(lambda v: pct(v))})
-            if len(payout):
-                fin_df["배당성향"] = payout.map(lambda v: pct(v, 0))
-            st.dataframe(fin_df.T, use_container_width=True)
-            if mult["pbr"] is not None and roe.mean() is not None:
-                st.caption(f"참고: PBR {xs(mult['pbr'])} · 평균 ROE {pct(float(roe.mean()))} — "
-                           f"ROE가 자기자본비용(≈Ke {pct(wacc_res['ke'])})을 지속 상회하는지가 "
-                           f"PBR 1배 이상을 정당화하는 핵심입니다.")
-        else:
-            st.caption("ROE 산출 불가(자기자본·순이익 데이터 부족)")
+def render_financial_panel(fv, container_border=True):
+    """금융업 초과수익모형 패널 — 요약 헤더와 밸류·DCF 탭에서 공유."""
+    s = fv["summary"]
+    ctx = st.container(border=True) if container_border else st.container()
+    with ctx:
+        st.markdown(f"**🏦 금융회사 전용 모델 — {fv['subtype']}**　"
+                    f"적정 PBR = (ROE − g) / (Ke − g)")
+        if not s:
+            for f in fv["flags"]:
+                st.warning(f)
+            return
+        mob.metric_row([
+            ("지속가능 ROE", pct(s["roe_med"]),
+             f"최근 {min(settings.FIN_ROE_YEARS, s['years'])}년 중앙값"),
+            ("자기자본비용 Ke", pct(s["ke"])),
+            ("ROE − Ke", "N/A" if s["spread"] is None
+             else f"{s['spread']*100:+.1f}%p", "양수여야 가치 창출"),
+            ("ROA(평균)", pct(s["roa_avg"])),
+            ("배당성향(평균)", pct(s["payout_avg"], 0)),
+            ("적용 성장률 g", pct(s["g_used"])),
+        ], MOBILE)
+        mob.metric_row([
+            ("BPS", price_fmt(s["bps"], fd.currency)),
+            ("현재 PBR", xs(s["pbr_now"])),
+            ("적정 PBR", xs(s["pb_fair"])),
+            ("적정주가", price_fmt(s["fair"], fd.currency)),
+            ("안전마진", pct(s["mos"])),
+            ("연간 초과수익", money(s["excess_return"], cur)),
+        ], MOBILE)
+        for f in fv["flags"]:
+            st.warning(f)
+        for n in fv["notes"]:
+            st.caption("· " + n)
+
+
+if fd.is_financial and fin_val:
+    render_financial_panel(fin_val)
 
 tabs = st.tabs(["요약", "ROIC", "현금", "재투자", "안전성",
                 "밸류·DCF", "결론", "데이터"] if MOBILE else
@@ -466,6 +541,12 @@ with tabs[5]:
     ]
     st.dataframe(pd.DataFrame(rows, columns=["지표", "값"]),
                  use_container_width=True, hide_index=True)
+    if fd.is_financial:
+        st.warning("금융회사에서는 EV·EV/EBITDA·EV/EBIT·P/FCF·FCF Yield가 "
+                   "성립하지 않습니다 — 현금과 부채가 영업의 원재료라 "
+                   "기업가치(EV) 정의 자체가 무의미합니다. **PBR·PER·"
+                   "배당수익률만 참고**하세요. WACC도 쓰지 않으며, 아래 "
+                   "적정가치는 자기자본비용(Ke)만 사용합니다.")
     st.caption(f"WACC {pct(wacc)} = Ke {pct(wacc_res['ke'])}×{pct(wacc_res['we'],0)} "
                f"+ 세후Kd {pct(wacc_res['kd_after'])}×{pct(wacc_res['wd'],0)} · "
                f"β {wacc_res['beta_used']:.2f}")
@@ -473,10 +554,21 @@ with tabs[5]:
         st.caption("· " + n)
 
     st.divider()
-    st.subheader("DCF")
-    st.caption(f"기준 FCF: {money(fcf0, cur)} ({fcf0_label}) · 1단계 성장률: {g1_label} · "
-               f"영구성장률 {pct(gT)}")
-    if g1_caution:
+    if fd.is_financial and fin_val:
+        st.subheader("적정가치 — 초과수익모형 (DCF 미실행)")
+        render_financial_panel(fin_val, container_border=False)
+        _fv = fin_val["summary"].get("fair")
+        if _fv and fd.price:
+            st.markdown("**매수가격 구간 (적정주가 대비)**")
+            st.dataframe(dcf_m.price_zones(_fv, fd.price),
+                         use_container_width=True, hide_index=True)
+            st.caption(f"목표 안전마진 {pct(mos_target,0)} 기준 매수 검토가: "
+                       f"{price_fmt(_fv*(1-mos_target), fd.currency)} 이하")
+    else:
+        st.subheader("DCF")
+        st.caption(f"기준 FCF: {money(fcf0, cur)} ({fcf0_label}) · "
+                   f"1단계 성장률: {g1_label} · 영구성장률 {pct(gT)}")
+    if g1_caution and not fd.is_financial:
         st.warning("성장률 가정 주의: 과거 고성장(연 12%↑)의 단순 외삽은 가치평가에서 "
                    "가장 흔한 오류입니다. 보수적 시나리오와 역산 DCF(시장 내재 기대치)를 "
                    "기준으로 판단하세요.")
@@ -532,7 +624,7 @@ with tabs[5]:
                          use_container_width=True, hide_index=True)
             st.caption(f"목표 안전마진 {pct(mos_target,0)} 기준 매수 검토가: "
                        f"{price_fmt(fair_base*(1-mos_target), fd.currency)} 이하")
-    else:
+    elif not fd.is_financial:
         st.warning("기준 FCF ≤ 0 또는 데이터 부족 — DCF는 임의값을 대입하지 않고 "
                    "N/A 처리합니다(명세 18·21).")
     if fd.price_history is not None:

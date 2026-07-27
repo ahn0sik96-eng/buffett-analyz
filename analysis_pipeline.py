@@ -18,6 +18,7 @@ from analysis.valuation import compute_multiples
 from analysis.cyclicality import compute_cyclicality
 from models.wacc import compute_wacc
 from models import dcf as dcf_m
+from models.financial_valuation import compute_financial_valuation
 from scoring.quality_score import (score_roic, score_fcf,
                                    score_reinvestment, score_debt)
 from scoring.valuation_score import score_valuation
@@ -75,16 +76,35 @@ def analyze(fd, a: dict) -> dict:
         g1_caution = a["g_manual"] > 0.12
 
     gT, mos_target = a["gT"], a["mos_target"]
-    scen = dcf_m.run_scenarios(fcf0, wacc, g1, gT, net_debt, fd.shares, fd.price) \
-        if fcf0 else None
-    scen, fx_sanity_msg = dcf_m.sanity_filter(scen, fd.price, fd.fx_adjusted) \
-        if scen else (scen, None)
-    fair_base = scen["기준"]["fair"] if scen else None
-    sens = dcf_m.sensitivity(fcf0, wacc, g1, net_debt, fd.shares) if fcf0 else None
-    reverse = dcf_m.reverse_dcf(fd.price, wacc, gT, net_debt, fd.shares, fcf0) \
-        if fcf0 else None
-    if fx_sanity_msg:
-        reverse, sens = None, None
+
+    # ── 금융업: FCF·EV·WACC가 정의되지 않으므로 DCF를 아예 돌리지 않는다 ────
+    #    (숫자가 나오되 전부 틀린 값이 되어, 결과를 신뢰하게 만드는 것이 더 위험)
+    fin_val = None
+    if fd.is_financial:
+        fin_val = compute_financial_valuation(fd, annual, wacc_res.get("ke"),
+                                              fd.price)
+        scen = sens = reverse = None
+        fair_base = fin_val["summary"].get("fair")
+        fx_sanity_msg = None
+        msgs.append({
+            "level": "warn",
+            "msg": f"금융회사({fin_val['subtype']})로 판별 — FCF 기반 DCF는 "
+                   f"예금·대출 증감이 영업활동현금흐름에 그대로 섞여 무의미하므로 "
+                   f"실행하지 않았습니다. 적정가치는 초과수익모형"
+                   f"(적정 PBR = (ROE−g)/(Ke−g))으로 산출했습니다.",
+        })
+    else:
+        scen = dcf_m.run_scenarios(fcf0, wacc, g1, gT, net_debt, fd.shares,
+                                   fd.price) if fcf0 else None
+        scen, fx_sanity_msg = dcf_m.sanity_filter(scen, fd.price, fd.fx_adjusted) \
+            if scen else (scen, None)
+        fair_base = scen["기준"]["fair"] if scen else None
+        sens = dcf_m.sensitivity(fcf0, wacc, g1, net_debt, fd.shares) \
+            if fcf0 else None
+        reverse = dcf_m.reverse_dcf(fd.price, wacc, gT, net_debt, fd.shares,
+                                    fcf0) if fcf0 else None
+        if fx_sanity_msg:
+            reverse, sens = None, None
 
     # ── 채점 ──
     if fd.is_financial:
@@ -114,9 +134,15 @@ def analyze(fd, a: dict) -> dict:
         components["moat"] = (None, WEIGHTS["moat"],
                               [f"미구현({NOT_IMPLEMENTED['moat']})"])
 
-    components["valuation"] = score_valuation(fd.price, fair_base,
-                                              mult.get("fcf_yield"), rf,
-                                              mult.get("per"))
+    if fd.is_financial:
+        # FCF수익률은 금융업에서 의미가 없으므로 전달하지 않는다.
+        # fair_base는 초과수익모형 결과(없으면 None → 밸류에이션 미채점).
+        components["valuation"] = score_valuation(fd.price, fair_base, None,
+                                                  rf, mult.get("per"))
+    else:
+        components["valuation"] = score_valuation(fd.price, fair_base,
+                                                  mult.get("fcf_yield"), rf,
+                                                  mult.get("per"))
 
     risk_codes = set()
     for r in (roic_res, cf_res, re_res, debt_res, cyc_res):
@@ -139,5 +165,5 @@ def analyze(fd, a: dict) -> dict:
         g1_label=g1_label, g1_caution=g1_caution, gT=gT, mos_target=mos_target,
         scen=scen, fx_sanity_msg=fx_sanity_msg, fair_base=fair_base, sens=sens,
         reverse=reverse, components=components, penalty_items=penalty_items,
-        scores=scores, cls=cls, concl=concl,
+        scores=scores, cls=cls, concl=concl, fin_val=fin_val,
     )

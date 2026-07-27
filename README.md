@@ -14,6 +14,11 @@
 - 부채 안전성(순부채/EBITDA·이자보상·유동성 3종·Altman Z·Piotroski F)
 - 상대가치 배수 + 무위험수익률 스프레드
 - DCF 3시나리오(보수/기준/낙관) · WACC×g 민감도 · **역산 DCF(내재 성장률)**
+- **비교·워치리스트 모드**: 여러 종목을 동일 가정으로 일괄 채점→정렬·CSV, '질 우수·저평가' 후보 자동 추림
+- **경기 방어력 간이 추정**(매출·FCF 변동성 기반, 정식 4단계 아님) — 미채점 25점 중 10점 반영
+- **역산 DCF 비교**: 시장 내재 성장률 vs 내 가정 성장률 나란히 표시 + 저평가/관망 판정
+- **모바일 최적화**: 접속 기기 자동 감지, 반응형 레이아웃(지표 2칸 배치·탭 축약·차트 축소), 수동 전환 토글
+- 데이터 수집 시각 표시 · 캐시 수동 초기화 버튼
 - 100점 체계 채점(미구현 항목 N/A 후 환산) · 등급 · 명세 2장 7분류
 - 적색 경고 시스템(명세 10장 계산 가능 12종) · 감점(−10 하한, 데이터부족 −5)
 - 서술형 해석(수준·추세·긍정·부정·불확실성·결론) · 매수가격 6구간
@@ -34,6 +39,8 @@ MVP는 **키 없이** yfinance만으로 동작합니다. 5단계(SEC/OpenDART 10
 ```bash
 streamlit run app.py
 ```
+
+휴대폰에서는 배포 주소로 접속하면 자동으로 모바일 레이아웃이 적용됩니다. 사이드바의 **📱 모바일 보기** 토글로 직접 켜고 끌 수 있습니다.
 좌측 사이드바에서 티커 입력 → 가정(무위험수익률·ERP·성장률·안전마진) 조정 → **분석 실행**.
 
 - **미국 주식**: `AAPL`, `MSFT`, `V`, `MA`, `AXP` …
@@ -66,6 +73,8 @@ ROIC 20 · FCF 15 · 재투자 15 · 해자 15 · 부채 10 · 경기방어 10 �
   "5개년 미만" 신뢰도 경고와 −5점이 표시되는 것이 **정상 동작**입니다.
   10개년 분석은 5단계 SEC EDGAR / OpenDART 연동에서 지원합니다.
 - 일회성 항목 조정(명세 4.3)은 공시 원문이 필요해 5단계에서 구현합니다(현재는 보고치 기준).
+- 경기 방어력 점수는 과거 실적 변동성 기반 **간이 추정치**이며, 정식 거시상관 분석(4단계)이 아닙니다.
+- 해자(15점)는 경쟁사 데이터가 필요해 여전히 미채점(N/A)입니다.
 - 금융회사는 일반 ROIC 모델이 부적절 → 감지 시 경고 + ROE 참고치만 표시(전용 모델 5단계).
 - 야후 `info` 필드는 간헐적으로 누락됩니다 → 다중 fallback 후에도 없으면 N/A.
 
@@ -85,11 +94,12 @@ pytest tests/ -v     # NOPAT·IC·ROIC·FCF·전환율·재투자·증분ROIC·W
 app.py                  # Streamlit 진입점 (화면 1~10 중 MVP 8탭)
 config/    settings.py scoring_rules.py
 data/      data_fetcher.py data_validator.py        # (5단계: sec/dart/market/macro)
-analysis/  roic.py cashflow.py reinvestment.py debt.py valuation.py
+analysis_pipeline.py    # 단일/비교 모드 공유 계산 진입점
+analysis/  roic.py cashflow.py reinvestment.py debt.py valuation.py cyclicality.py
 models/    wacc.py dcf.py                            # (역산 DCF 포함)
 scoring/   quality_score.py valuation_score.py risk_penalties.py final_score.py
 reports/   narrative_report.py excel_report.py       # (6단계: pdf_report)
-ui/        charts.py formatting.py
+ui/        charts.py formatting.py mobile.py
 tests/     test_roic / cashflow / reinvestment / dcf / scoring
 ```
 
