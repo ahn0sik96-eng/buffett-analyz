@@ -12,6 +12,42 @@ HOLDING_ASSET_SHARE = 0.30      # 지분법·장기지분투자 / 총자산 임�
 HOLDING_NAME_KEYWORDS = ("지주", "홀딩스")   # 한국 지주사 명명 관례(강한 신호)
 
 
+def _coverage(df: pd.DataFrame, cols: tuple[str, ...]) -> dict:
+    """Return valid-year coverage for one metric family."""
+    if df.empty or any(c not in df.columns for c in cols):
+        return {"years": 0, "period": "N/A"}
+    valid = df.loc[df[list(cols)].notna().all(axis=1)]
+    if valid.empty:
+        return {"years": 0, "period": "N/A"}
+    return {
+        "years": int(len(valid)),
+        "period": f"{int(valid.index.min())}–{int(valid.index.max())}",
+    }
+
+
+def coverage_summary(fd: FinancialData) -> dict:
+    """Metric-specific data coverage and an intentionally coarse quality grade."""
+    df = fd.annual
+    cov = {
+        "매출": _coverage(df, ("revenue",)),
+        "ROIC": _coverage(df, ("ebit", "total_assets", "equity")),
+        "FCF": _coverage(df, ("ocf", "capex")),
+        "주식수": _coverage(df, ("diluted_shares",))
+        if "diluted_shares" in df.columns
+        else _coverage(df, ("shares_out",)),
+    }
+    core_min = min(cov[k]["years"] for k in ("매출", "ROIC", "FCF"))
+    estimated = sum(
+        token in " ".join(fd.messages)
+        for token in ("대체", "실패", "근사", "부재")
+    )
+    grade = ("A" if core_min >= 10 and estimated == 0 else
+             "B" if core_min >= 7 else
+             "C" if core_min >= 5 else "D")
+    return {"metrics": cov, "core_min_years": core_min,
+            "grade": grade, "estimated_signals": estimated}
+
+
 def is_holding(fd: FinancialData) -> bool:
     """지주회사/투자회사 휴리스틱 감지.
 
@@ -45,18 +81,19 @@ def validate(fd: FinancialData) -> tuple[list[dict], bool]:
     """
     out: list[dict] = []
     df = fd.annual
-    years = int(_g(df, "revenue").notna().sum())
+    coverage = coverage_summary(fd)
+    years = coverage["metrics"]["매출"]["years"]
 
     shortage = years < settings.MIN_YEARS
     if shortage:
         out.append({"level": "error",
-                    "msg": f"연간 데이터 {years}개년 — 최소 {settings.MIN_YEARS}개년 미만으로 "
+                    "msg": f"매출 데이터 {years}개년 — 최소 {settings.MIN_YEARS}개년 미만으로 "
                            f"분석 신뢰도가 낮습니다(점수 −5점 반영). 10개년 분석은 5단계 "
                            f"SEC/OpenDART 연동에서 지원됩니다."})
     elif years < settings.TARGET_YEARS:
         out.append({"level": "warn",
-                    "msg": f"연간 데이터 {years}개년 — 목표 {settings.TARGET_YEARS}개년 대비 짧아 "
-                           f"장기 지표(10년 평균 등)는 가용 기간 기준으로 계산됩니다."})
+                    "msg": f"매출 데이터 {years}개년 — 목표 {settings.TARGET_YEARS}개년 대비 짧습니다. "
+                           f"ROIC·FCF·주식수는 아래 지표별 가용기간을 따릅니다."})
 
     latest = df.iloc[-1] if len(df) else pd.Series(dtype=float)
     missing = [f for f in CRITICAL_FIELDS

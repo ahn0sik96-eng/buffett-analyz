@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import sys
+import html
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -270,8 +271,22 @@ if mode == "비교·워치리스트":
     for i, t in enumerate(tickers):
         try:
             fd = load(t)
-            r = analyze(fd, ASSUMPTIONS)
+            # 혼합 국가 비교에서 첫 종목의 미국 금리·ERP를 한국 종목에도
+            # 그대로 적용하지 않는다. 국가가 달라지면 해당 시장 기본값으로
+            # 자동 보정하고 표에 실제 적용값을 공개한다.
+            _a = dict(ASSUMPTIONS)
+            if fd.country != country_hint:
+                _a.update(
+                    rf=load_rf(fd.country)["rf"],
+                    erp=settings.DEFAULT_ERP_BY_COUNTRY.get(
+                        fd.country, settings.DEFAULT_ERP),
+                    tax_fb=settings.TAX_FALLBACK.get(fd.country, .25),
+                    gT=settings.DEFAULT_TERMINAL_G_BY_COUNTRY.get(
+                        fd.country, settings.DEFAULT_TERMINAL_G),
+                )
+            r = analyze(fd, _a)
             sc = r["scores"]
+            cov = r["coverage"]
             base = r["scen"]["기준"] if r["scen"] else {}
             if not base and r.get("fin_val"):
                 base = {"mos": r["fin_val"]["summary"].get("mos")}
@@ -289,7 +304,12 @@ if mode == "비교·워치리스트":
                 "안전마진(기준)": base.get("mos"),
                 "내재성장률": r["reverse"]["implied_g"] if r["reverse"] else None,
                 "경고": len(r["debt_res"].get("warnings", [])),
-                "데이터연수": r["roic_res"]["summary"].get("years"),
+                "국가": fd.country,
+                "데이터품질": cov["grade"],
+                "ROIC연수": cov["metrics"]["ROIC"]["years"],
+                "FCF연수": cov["metrics"]["FCF"]["years"],
+                "적용rf": _a["rf"],
+                "적용ERP": _a["erp"],
             })
         except Exception as e:
             errors.append(f"{t}: {e}")
@@ -315,7 +335,8 @@ if mode == "비교·워치리스트":
     disp = df.copy()
     for c in ("종합", "질", "밸류"):
         disp[c] = disp[c].map(lambda v: "N/A" if v is None else f"{v:.0f}")
-    for c in ("ROIC(평균)", "FCF마진", "안전마진(기준)", "내재성장률"):
+    for c in ("ROIC(평균)", "FCF마진", "안전마진(기준)", "내재성장률",
+              "적용rf", "적용ERP"):
         disp[c] = disp[c].map(lambda v: pct(v))
     disp["순부채/EBITDA"] = disp["순부채/EBITDA"].map(lambda v: xs(v))
     if MOBILE:
@@ -326,7 +347,8 @@ if mode == "비교·워치리스트":
     st.dataframe(disp, use_container_width=True, hide_index=True)
     st.caption("‘질’은 밸류에이션을 제외한 기업 품질 환산점수 — 이 값이 높은데 ‘밸류’가 "
                "낮으면 ‘좋은데 비싼’ 워치리스트 후보입니다. ‘내재성장률’은 현 주가가 "
-               "정당화되려면 필요한 5년 FCF 성장률(시장 기대치의 근사)입니다.")
+               "정당화되려면 필요한 5년 FCF 성장률의 수학적 역산치입니다. 혼합 국가 "
+               "비교에서는 국가별 rf·ERP·영구성장률을 자동 적용합니다.")
 
     # 워치리스트 후보 자동 추림: 질 높은데 밸류 낮은
     cand = df[(pd.to_numeric(df["질"], errors="coerce") >= 75) &
@@ -352,12 +374,16 @@ if not ticker_in:
     st.stop()
 
 try:
-    with st.spinner("재무데이터 수집 중…"):
-        _tick, _tick_note = clean_single_ticker(ticker_in)
+    _tick, _tick_note = clean_single_ticker(ticker_in)
+    with st.status(f"{_tick} 새 분석 진행 중 — 이전 종목 결과는 사용하지 마세요.",
+                   expanded=True) as _analysis_status:
         if _tick_note:
             st.info("ℹ️ " + _tick_note)
         fd = load(_tick)
+        st.write("재무데이터 수집 완료 · 계산과 검증을 진행합니다.")
         R = analyze(fd, ASSUMPTIONS)
+        _analysis_status.update(
+            label=f"{fd.ticker} 분석 완료", state="complete", expanded=False)
 except Exception as e:
     st.error(str(e))
     st.stop()
@@ -375,10 +401,14 @@ sens = R["sens"]; reverse = R["reverse"]
 components = R["components"]; penalty_items = R["penalty_items"]
 scores = R["scores"]; cls = R["cls"]; concl = R["concl"]
 fin_val = R.get("fin_val")
+coverage = R["coverage"]
 penalty_total = scores["penalty"]
 
 # ── 화면 2: 종합 요약 헤더 ─────────────────────────────────────────────────
-st.subheader(f"{fd.name}  ·  {fd.ticker}")
+_title = html.escape(f"{fd.name}  ·  {fd.ticker}")
+_anchor = "company-" + "".join(c for c in fd.ticker.lower()
+                               if c.isalnum() or c in "-_")
+st.markdown(f'<h3 id="{_anchor}">{_title}</h3>', unsafe_allow_html=True)
 st.caption(f"{fd.sector or '섹터 N/A'} / {fd.industry or '산업 N/A'} · "
            f"재무통화 {cur or 'N/A'} · 출처 {fd.source}"
            + (f" · 수집 {fd.fetched_at}" if getattr(fd, 'fetched_at', '') else ""))
@@ -408,6 +438,14 @@ if scores.get("partial_note"):
 for m in msgs:
     (st.error if m["level"] == "error" else
      st.warning if m["level"] == "warn" else st.caption)(m["msg"])
+
+_cov_rows = [
+    {"지표": k, "가용기간": v["period"], "연수": v["years"]}
+    for k, v in coverage["metrics"].items()
+]
+st.markdown(f"**데이터 신뢰도: {coverage['grade']}등급** "
+            f"(핵심 지표 최소 {coverage['core_min_years']}개년)")
+st.dataframe(pd.DataFrame(_cov_rows), use_container_width=True, hide_index=True)
 
 def render_financial_panel(fv, container_border=True):
     """금융업 초과수익모형 패널 — 요약 헤더와 밸류·DCF 탭에서 공유."""
@@ -528,6 +566,16 @@ with tabs[2]:
          "액면분할·단위 단절 시 N/A"),
     ], MOBILE)
     st.markdown(safe_narrative(nr.fcf_text, cf_res))
+    _cy = cyc_res.get("summary", {})
+    if _cy.get("cycle_position"):
+        st.markdown("**경기순환 보정 지표**")
+        mob.metric_row([
+            ("현재 사이클 위치", _cy["cycle_position"],
+             "최근 FCF와 장기 중앙값의 비율로 추정"),
+            ("장기 중앙 FCF", money(_cy.get("fcf_mid"), cur)),
+            ("장기 중앙 ROIC", pct(_cy.get("roic_mid"))),
+            ("최악 매출성장률", pct(_cy.get("rev_worst"))),
+        ], MOBILE, per_row_desktop=4)
     for f in cf_res["flags"]:
         st.warning(f)
     st.dataframe(fmt_table(cf_res["table"], cur,
@@ -666,10 +714,12 @@ with tabs[5]:
                 ig = reverse["implied_g"]
                 mob.metric_row([
                     ("① 시장 내재 성장률", pct(ig),
-                     "현재 주가가 정당화되려면 필요한 5년 FCF 성장률 — 시장 기대치 근사"),
+                     "현재 모형 가정을 고정해 주가에서 역산한 수학적 요구 성장률"),
                     ("② 내 가정 성장률", pct(g1),
                      f"사이드바에서 설정한 1단계 성장률 ({g1_label})"),
                 ], MOBILE, per_row_desktop=2, per_row_mobile=2)
+                st.caption("내재 성장률은 시장 참여자의 실제 전망치가 아닙니다. 현재 FCF·WACC·"
+                           "영구성장률·자본구조를 고정했을 때 현 주가를 설명하는 역산치입니다.")
                 gap = g1 - ig
                 if gap >= 0.02:
                     st.success(f"내 가정({pct(g1)})이 시장 기대({pct(ig)})보다 "

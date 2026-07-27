@@ -47,6 +47,8 @@ def test_volatile_company_scores_cyclical():
     res = compute_cyclicality(df, rr, cc, 0.09)
     assert res["score"] < res.get("_max", 10)
     assert res["summary"]["rev_neg"] >= 2
+    assert res["summary"]["fcf_mid"] is not None
+    assert res["summary"]["cycle_position"] in {"호황권", "중간권", "불황권"}
 
 
 def test_thin_data_not_scored():

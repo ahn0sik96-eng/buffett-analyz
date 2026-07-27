@@ -35,13 +35,24 @@ def compute_cyclicality(annual, roic_res, cf_res, wacc) -> dict:
 
     rs = roic_res["summary"]
     roic_min = rs.get("min")
+    roic_mid = rs.get("median")
     years = rs.get("years", 0)
+    fcf = _g(annual, "fcf").dropna()
+    fcf_mid = _f(fcf.median()) if len(fcf) >= 5 else None
+    fcf_latest = _f(fcf.iloc[-1]) if len(fcf) else None
+    cycle_position = None
+    if fcf_mid is not None and fcf_mid > 0 and fcf_latest is not None:
+        ratio = fcf_latest / fcf_mid
+        cycle_position = ("호황권" if ratio >= 1.35 else
+                          "불황권" if ratio <= 0.65 else "중간권")
 
     # 데이터가 너무 얇으면 미채점(허위 정확성 방지)
     if years < 3 or rev_std is None:
         return {"summary": {"years": years, "rev_std": rev_std,
                             "rev_neg": rev_neg, "fcf_neg": fcf_neg,
                             "rev_worst": rev_worst, "roic_min": roic_min,
+                            "roic_mid": roic_mid, "fcf_mid": fcf_mid,
+                            "cycle_position": cycle_position,
                             "level": None, "is_proxy": True},
                 "flags": ["경기 방어력: 데이터 부족(3개년 미만)으로 추정 불가"],
                 "risk_codes": set()}
@@ -91,6 +102,8 @@ def compute_cyclicality(annual, roic_res, cf_res, wacc) -> dict:
             "years": years, "rev_std": _f(rev_std), "rev_neg": rev_neg,
             "rev_worst": _f(rev_worst), "fcf_neg": fcf_neg,
             "roic_min": _f(roic_min), "rev_level": rev_lv,
+            "roic_mid": _f(roic_mid), "fcf_mid": fcf_mid,
+            "cycle_position": cycle_position,
             "floor_level": floor_lv, "level": level, "is_proxy": True,
         },
         "flags": flags,

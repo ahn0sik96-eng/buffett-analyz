@@ -63,6 +63,17 @@ def _fred_latest(series_id: str, timeout: float = HTTP_TIMEOUT) -> tuple[float, 
     return float(last[val_col]) / 100.0, str(last[date_col])[:10]
 
 
+def _yahoo_us10y() -> tuple[float, str]:
+    """Fallback US 10Y yield from Yahoo's ^TNX quote/history."""
+    import yfinance as yf
+    tk = yf.Ticker("^TNX")
+    hist = tk.history(period="5d", interval="1d")
+    if hist.empty:
+        raise ValueError("Yahoo ^TNX 빈 응답")
+    row = hist.dropna(subset=["Close"]).iloc[-1]
+    return float(row["Close"]) / 100.0, str(row.name.date())
+
+
 def fetch_rf(country: str) -> dict:
     """국가코드 → {'rf', 'label', 'auto'} .
 
@@ -86,6 +97,15 @@ def fetch_rf(country: str) -> dict:
         return {"rf": v, "auto": True, "reason": "ok",
                 "label": f"FRED {sid} · {d} 기준 {v:.2%}{note}"}
     except Exception as e:                      # 네트워크·포맷·이상값 모두 폴백
+        if country == "US":
+            try:
+                v, d = _yahoo_us10y()
+                if lo < v < hi:
+                    return {"rf": v, "auto": True, "reason": "ok",
+                            "label": f"Yahoo Finance ^TNX · {d} 기준 {v:.2%} "
+                                     f"(FRED 조회 실패 후 대체)"}
+            except Exception:
+                pass
         return {"rf": fallback, "auto": False, "reason": "fail",
                 "label": f"자동 조회 실패({type(e).__name__}) — "
                          f"기본값 {fallback:.2%} 사용, 직접 확인 권장"}

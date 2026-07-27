@@ -30,6 +30,16 @@ def _slope(s: pd.Series):
     return _f(np.polyfit(np.arange(len(s)), s.values.astype(float), 1)[0] / scale)
 
 
+def _log_growth(s: pd.Series, max_years: int = 5):
+    """Recent log-linear annual growth; less endpoint-sensitive than CAGR."""
+    v = pd.to_numeric(s, errors="coerce").dropna()
+    v = v[v > 0].iloc[-(max_years + 1):]
+    if len(v) < 3:
+        return None
+    slope = np.polyfit(np.arange(len(v)), np.log(v.values.astype(float)), 1)[0]
+    return _f(np.exp(slope) - 1)
+
+
 def _comparable_shares(s: pd.Series, max_years: int = 5) -> pd.Series:
     """Return a recent, split-comparable share-count series.
 
@@ -129,10 +139,12 @@ def compute_cashflow(annual: pd.DataFrame, ttm: dict | None = None,
         "margin_latest": _f(margin.dropna().iloc[-1]) if margin.notna().any() else None,
         "margin_avg": _f(margin.dropna().mean()) if margin.notna().any() else None,
         "cagr3": cagr(fcf, 3), "cagr5": cagr(fcf, 5), "cagr_max": cagr(fcf),
+        "log_growth5": _log_growth(fcf, 5),
         "growth_std": _f(growth.std()) if len(growth) >= 2 else None,
         "neg_count": neg,
         "conv_avg": _f(conv.dropna().mean()) if conv.notna().any() else None,
         "fcf_ps_cagr": cagr(fcf_ps.reindex(shv.index)) if len(shv) >= 2 else None,
+        "fcf_ps_cagr5": cagr(fcf_ps.reindex(shv.index), 5) if len(shv) >= 2 else None,
         "share_change": share_chg,
         "share_period": share_period,
         "sbc_ratio": sbc_ratio,

@@ -165,14 +165,11 @@ def conclusion(fd, scores: dict, cls: tuple[str, str], dcf_scen: dict | None,
                         f"연속 하회")
 
     # 핵심 판단문 (명세 화면 2 형식) — 프로그램의 추론
-    parts = [f"{fd.name}은(는)"]
-    parts.append(strengths[0] + ("과 " + strengths[1] if len(strengths) > 1 else "") +
-                 "을(를) 보유"
-                 if strengths else "정량 강점이 뚜렷하지 않음")
+    parts = [f"{(fd.name or fd.ticker).rstrip('.')}.", "이 기업은"]
+    parts.append((" · ".join(strengths[:2]) + " 등의 정량 강점이 있습니다.")
+                 if strengths else "뚜렷한 정량 강점이 확인되지 않았습니다.")
     if weaknesses:
-        parts.append(f"하고 있으나, {weaknesses[0]}이(가) 관찰됩니다.")
-    else:
-        parts.append("하고 있습니다.")
+        parts.append(f"다만 {weaknesses[0]}이(가) 관찰됩니다.")
     if scores.get("quality_norm") is not None and scores.get("val_norm") is not None:
         parts.append(f"기업의 질 환산 {scores['quality_norm']:.0f}점, "
                      f"밸류에이션 환산 {scores['val_norm']:.0f}점 — {cls[0]}.")
