@@ -1,0 +1,256 @@
+"""DART OpenAPI 재무데이터 수집 (국내 상장사).
+
+EDGAR와 다른 점 — 설계가 이래야 하는 이유:
+  1) 인증 필요       : crtfc_key 발급 필수(EDGAR는 무인증).
+  2) 연도별 호출     : companyfacts처럼 전체 이력을 한 번에 주지 않는다.
+                       단 사업보고서 1건에 당기·전기·전전기가 들어 있어
+                       3년씩 건너뛰며 호출하면 5회로 15년을 덮는다.
+  3) 고유번호 매핑   : 종목코드(005930)가 아니라 DART corp_code(8자리)를
+                       써야 한다. corpCode.xml을 ZIP으로 받아 파싱한다.
+  4) 계정 식별       : account_id(IFRS 표준계정코드)가 우선이지만
+                       '-표준계정코드 미사용-' 인 경우가 많아 한글 계정명
+                       매칭을 폴백으로 둔다.
+  5) 시작 시점       : API 제공은 2015 사업연도부터. 전전기까지 끌어와도
+                       2013년이 하한이라 EDGAR(2008~)보다 이력이 짧다.
+
+반환 형태는 data_fetcher._collect_annual()과 동일한 표준 DataFrame이다.
+"""
+from __future__ import annotations
+
+import io
+import time
+import zipfile
+import xml.etree.ElementTree as ET
+from functools import lru_cache
+
+import numpy as np
+import pandas as pd
+
+from config import settings
+
+BASE = "https://opendart.fss.or.kr/api"
+CORP_CODE_URL = f"{BASE}/corpCode.xml"
+FNLTT_URL = f"{BASE}/fnlttSinglAcntAll.json"
+
+REPRT_ANNUAL = "11011"          # 사업보고서
+DART_FIRST_YEAR = 2015          # API 제공 시작 사업연도
+
+STATUS_MSG = {
+    "010": "등록되지 않은 인증키입니다.",
+    "011": "사용할 수 없는 인증키입니다(일시적 사용 중지).",
+    "012": "접근할 수 없는 IP입니다.",
+    "013": "조회된 데이터가 없습니다.",
+    "020": "요청 제한을 초과했습니다(일 20,000건).",
+    "021": "조회 가능한 회사 개수가 초과했습니다.",
+    "100": "필드의 부적절한 값입니다.",
+    "101": "부적절한 접근입니다.",
+    "800": "시스템 점검 중입니다.",
+    "900": "정의되지 않은 오류가 발생했습니다.",
+    "901": "사용자 계정의 개인정보보유기간이 만료되었습니다.",
+}
+
+# ── 표준항목 → (IFRS account_id 후보, 한글 계정명 후보) ─────────────────────
+# account_id는 2019년경 'ifrs_' → 'ifrs-full_' 로 접두사가 바뀌어 둘 다 넣는다.
+TAGS: dict[str, tuple[list[str], list[str]]] = {
+    "revenue": (["ifrs-full_Revenue", "ifrs_Revenue"],
+                ["매출액", "수익(매출액)", "영업수익", "매출"]),
+    "gross_profit": (["ifrs-full_GrossProfit", "ifrs_GrossProfit"],
+                     ["매출총이익"]),
+    "operating_income": (["dart_OperatingIncomeLoss",
+                          "dart_OperatingIncomeLossAbstract"],
+                         ["영업이익", "영업이익(손실)"]),
+    "pretax_income": (["ifrs-full_ProfitLossBeforeTax",
+                       "ifrs_ProfitLossBeforeTax"],
+                      ["법인세비용차감전순이익", "법인세비용차감전순이익(손실)"]),
+    "tax_provision": (["ifrs-full_IncomeTaxExpenseContinuingOperations",
+                       "ifrs_IncomeTaxExpenseContinuingOperations"],
+                      ["법인세비용"]),
+    "net_income": (["ifrs-full_ProfitLoss", "ifrs_ProfitLoss"],
+                   ["당기순이익", "당기순이익(손실)", "분기순이익"]),
+    "interest_expense": ([], ["이자비용", "금융비용"]),
+
+    "total_assets": (["ifrs-full_Assets", "ifrs_Assets"], ["자산총계"]),
+    "current_assets": (["ifrs-full_CurrentAssets", "ifrs_CurrentAssets"],
+                       ["유동자산"]),
+    "current_liabilities": (["ifrs-full_CurrentLiabilities",
+                             "ifrs_CurrentLiabilities"], ["유동부채"]),
+    "cash": (["ifrs-full_CashAndCashEquivalents", "ifrs_CashAndCashEquivalents"],
+             ["현금및현금성자산"]),
+    "equity": (["ifrs-full_Equity", "ifrs_Equity"], ["자본총계"]),
+    "retained_earnings": (["ifrs-full_RetainedEarnings", "ifrs_RetainedEarnings"],
+                          ["이익잉여금", "이익잉여금(결손금)"]),
+    "inventory": (["ifrs-full_Inventories", "ifrs_Inventories"], ["재고자산"]),
+    "receivables": ([], ["매출채권", "매출채권 및 기타유동채권"]),
+    "total_liabilities": (["ifrs-full_Liabilities", "ifrs_Liabilities"],
+                          ["부채총계"]),
+    "goodwill_intangibles": (["ifrs-full_IntangibleAssetsOtherThanGoodwill"],
+                             ["무형자산", "영업권"]),
+
+    "ocf": (["ifrs-full_CashFlowsFromUsedInOperatingActivities",
+             "ifrs_CashFlowsFromUsedInOperatingActivities"],
+            ["영업활동현금흐름", "영업활동으로인한현금흐름"]),
+    "capex": (["ifrs-full_PurchaseOfPropertyPlantAndEquipmentClassifiedAs"
+               "InvestingActivities"],
+              ["유형자산의 취득", "유형자산의취득"]),
+    "depreciation": (["ifrs-full_DepreciationAndAmortisationExpense"],
+                     ["감가상각비", "감가상각비와 상각비"]),
+    "dividends_paid": ([], ["배당금지급", "배당금의 지급"]),
+}
+
+
+# ── 인증·HTTP ───────────────────────────────────────────────────────────────
+def api_key() -> str:
+    k = settings.dart_api_key()
+    if not k:
+        raise ValueError(
+            "DART API 키가 없습니다. Streamlit Secrets에 "
+            'DART_API_KEY = "..." 를 설정하세요 (opendart.fss.or.kr 무료 발급).')
+    return k
+
+
+def _get(url: str, params: dict, timeout: float = 15.0, retries: int = 2):
+    import requests
+
+    last = None
+    for i in range(retries):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last = e
+            time.sleep(0.3 * (i + 1))
+    raise last or RuntimeError("DART 요청 실패")
+
+
+def _check(js: dict):
+    st = str(js.get("status", ""))
+    if st and st != "000":
+        raise ValueError(f"DART {st}: {STATUS_MSG.get(st, js.get('message',''))}")
+
+
+# ── 고유번호 매핑 ───────────────────────────────────────────────────────────
+@lru_cache(maxsize=1)
+def _corp_map() -> dict[str, str]:
+    """종목코드(6자리) → corp_code(8자리). ZIP+XML이라 세션당 1회만 조회."""
+    r = _get(CORP_CODE_URL, {"crtfc_key": api_key()}, timeout=30.0)
+    with zipfile.ZipFile(io.BytesIO(r.content)) as z:
+        xml = z.read(z.namelist()[0])
+    out: dict[str, str] = {}
+    for e in ET.fromstring(xml).iter("list"):
+        stock = (e.findtext("stock_code") or "").strip()
+        corp = (e.findtext("corp_code") or "").strip()
+        if stock and corp:                       # 상장사만(비상장은 공란)
+            out[stock] = corp
+    return out
+
+
+def get_corp_code(stock_code: str) -> str | None:
+    return _corp_map().get(stock_code.strip()[:6])
+
+
+# ── 금액 파싱 ───────────────────────────────────────────────────────────────
+def _amt(v) -> float:
+    if v is None:
+        return np.nan
+    s = str(v).strip().replace(",", "").replace(" ", "")
+    if s in ("", "-", "--"):
+        return np.nan
+    neg = s.startswith("(") and s.endswith(")")
+    if neg:
+        s = s[1:-1]
+    try:
+        x = float(s)
+    except ValueError:
+        return np.nan
+    return -x if neg else x
+
+
+def _match(item: dict, ids: list[str], names: list[str]) -> bool:
+    aid = (item.get("account_id") or "").strip()
+    if aid and aid in ids:
+        return True
+    if aid and aid not in ("-표준계정코드 미사용-", ""):
+        return False                       # 표준코드가 있는데 다르면 불일치
+    nm = (item.get("account_nm") or "").strip().replace(" ", "")
+    return any(nm == n.replace(" ", "") for n in names)
+
+
+def _parse_report(items: list[dict], year: int) -> dict[int, dict[str, float]]:
+    """사업보고서 1건 → {연도: {항목: 값}}. 당기·전기·전전기 3개년을 뽑는다."""
+    cols = [(year, "thstrm_amount"), (year - 1, "frmtrm_amount"),
+            (year - 2, "bfefrmtrm_amount")]
+    out: dict[int, dict[str, float]] = {y: {} for y, _ in cols}
+
+    for field, (ids, names) in TAGS.items():
+        for it in items:
+            if not _match(it, ids, names):
+                continue
+            for y, key in cols:
+                v = _amt(it.get(key))
+                if np.isfinite(v) and field not in out[y]:
+                    out[y][field] = v
+            break                          # 항목당 첫 매칭만 채택
+    return {y: d for y, d in out.items() if d}
+
+
+def fetch_annual(stock_code: str, years_back: int = 12
+                 ) -> tuple[pd.DataFrame, str]:
+    """종목코드 → (연간 재무 DataFrame, 안내 메시지). 실패 시 예외."""
+    corp = get_corp_code(stock_code)
+    if corp is None:
+        raise ValueError(f"{stock_code}: DART 고유번호를 찾지 못함(비상장·폐지 가능성)")
+
+    import datetime as dt
+    latest = dt.date.today().year - 1        # 직전 사업연도부터
+    targets, y = [], latest
+    while y >= max(DART_FIRST_YEAR, latest - years_back) and len(targets) < 6:
+        targets.append(y)
+        y -= 3                               # 보고서당 3개년 → 3년씩 건너뛰기
+
+    merged: dict[int, dict[str, float]] = {}
+    errors: list[str] = []
+    for by in targets:
+        got = False
+        for fs_div in ("CFS", "OFS"):        # 연결 우선, 없으면 별도
+            try:
+                js = _get(FNLTT_URL, {
+                    "crtfc_key": api_key(), "corp_code": corp,
+                    "bsns_year": str(by), "reprt_code": REPRT_ANNUAL,
+                    "fs_div": fs_div}).json()
+                _check(js)
+                parsed = _parse_report(js.get("list", []), by)
+                for yy, d in parsed.items():
+                    # 최신 보고서가 뒤에 오지 않도록: 기존 값이 없을 때만 채움
+                    merged.setdefault(yy, {}).update(
+                        {k: v for k, v in d.items() if k not in merged[yy]})
+                got = bool(parsed)
+                if got:
+                    break
+            except Exception as e:
+                errors.append(f"{by}/{fs_div}: {e}")
+        time.sleep(0.1)                      # 호출 간격 여유
+
+    if not merged:
+        raise ValueError("DART 재무 데이터 없음 — " + ("; ".join(errors[:2])
+                                                   or "응답 비어 있음"))
+
+    df = pd.DataFrame(merged).T.sort_index()
+    df.index.name = "fy"
+    if "revenue" not in df.columns:
+        raise ValueError("DART 응답에서 매출 계정을 찾지 못함")
+
+    # 야후 정의에 맞춘 합성 항목
+    def col(c):
+        return df[c] if c in df.columns else pd.Series(np.nan, index=df.index)
+
+    df["working_capital"] = col("current_assets") - col("current_liabilities")
+    if "total_debt" not in df.columns:
+        df["total_debt"] = np.nan            # DART 표준계정에 차입금 합계 없음
+
+    yrs = df.index.tolist()
+    msg = (f"DART OpenAPI {len(yrs)}개년({min(yrs)}~{max(yrs)}) 적용 · "
+           f"고유번호 {corp} · 사업보고서(연결우선) 기준")
+    if "total_debt" in df and df["total_debt"].isna().all():
+        msg += " · 총차입금은 표준계정에 없어 순부채는 현금 기준 근사"
+    return df, msg

@@ -298,6 +298,24 @@ def fetch(user_input: str) -> FinancialData:
                     msgs.append(f"SEC EDGAR 조회 실패({type(e).__name__}: {e}) — "
                                 f"야후 {len(annual)}개년 데이터로 진행합니다.")
 
+            # ── 한국 종목: DART로 장기 이력 교체 시도 ──────────────────────
+            if country == "KR" and settings.DART_ENABLED:
+                try:
+                    from data import dart_fetcher
+                    code = re.sub(r"\D", "", tick)[:6]
+                    dart_df, dart_msg = dart_fetcher.fetch_annual(
+                        code, years_back=settings.DART_YEARS_BACK)
+                    if len(dart_df) >= max(settings.DART_MIN_YEARS, len(annual)):
+                        annual = _derive(dart_df)
+                        source = "DART OpenAPI (재무) + Yahoo Finance (주가·정보)"
+                        msgs.append(dart_msg)
+                    else:
+                        msgs.append(f"DART가 {len(dart_df)}개년만 반환해 "
+                                    f"야후 데이터를 유지했습니다.")
+                except Exception as e:
+                    msgs.append(f"DART 조회 실패({type(e).__name__}: {e}) — "
+                                f"야후 {len(annual)}개년 데이터로 진행합니다.")
+
             price = _get_price(tk, info)
             shares = info.get("sharesOutstanding")
             if not shares:
