@@ -50,6 +50,21 @@ def load_rf(country: str) -> dict:
     return market_rates.fetch_rf(country)
 
 
+def safe_narrative(fn, *args):
+    """서술 문장 생성 가드.
+
+    narrative_report의 *_text 함수들은 채점 결과가 미채점(N/A)일 때
+    None 인덱싱으로 죽을 수 있다(예: reinvest_text의 판정 튜플).
+    서술은 장식이므로 실패 시 앱을 죽이는 대신 사유만 표기한다 —
+    점수 테이블에 이미 미채점 근거가 있으니 정보 손실은 없다.
+    """
+    try:
+        return fn(*args)
+    except Exception as e:
+        return (f"_서술 생성 생략 — 미채점 항목이 포함되어 문장을 구성할 수 "
+                f"없습니다({type(e).__name__})._")
+
+
 def mos_disp(v):
     """안전마진 표시.
 
@@ -467,7 +482,7 @@ with tabs[1]:
         st.markdown(f"**분해({d['fy']}):** ROIC = NOPAT마진 {pct(d['nopat_margin'])} × "
                     f"투하자본회전율 {d['ic_turnover']:.2f}회")
     st.caption(f"투하자본 방식: {s['ic_method']}")
-    st.markdown(nr.roic_text(roic_res, wacc))
+    st.markdown(safe_narrative(nr.roic_text, roic_res, wacc))
     for f in roic_res["flags"]:
         st.warning(f)
     st.dataframe(fmt_table(roic_res["table"], cur,
@@ -489,7 +504,7 @@ with tabs[2]:
         ("현금전환율(평균)", pct(s["conv_avg"], 0)),
         ("주식수 변화", pct(s["share_change"])),
     ], MOBILE)
-    st.markdown(nr.fcf_text(cf_res))
+    st.markdown(safe_narrative(nr.fcf_text, cf_res))
     for f in cf_res["flags"]:
         st.warning(f)
     st.dataframe(fmt_table(cf_res["table"], cur,
@@ -510,7 +525,7 @@ with tabs[3]:
     ], MOBILE, per_row_desktop=4)
     if s["quadrant"]:
         st.markdown(f"**판정:** {s['quadrant'][0]} — {s['quadrant'][1]}")
-    st.markdown(nr.reinvest_text(re_res))
+    st.markdown(safe_narrative(nr.reinvest_text, re_res))
     for f in re_res["flags"]:
         st.warning(f)
     st.dataframe(fmt_table(re_res["table"], cur,
@@ -537,7 +552,7 @@ with tabs[4]:
         ("Piotroski F", "N/A" if not p else f"{p['score']} / {p['valid']}"),
         ("단기부채 비중", pct(L["short_share"], 0)),
     ], MOBILE, per_row_desktop=3)
-    st.markdown(nr.debt_text(debt_res))
+    st.markdown(safe_narrative(nr.debt_text, debt_res))
     if debt_res["warnings"]:
         st.markdown("**🔴 적색 경고**")
         for w in debt_res["warnings"]:

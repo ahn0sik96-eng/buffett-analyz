@@ -194,6 +194,20 @@ def _safe_info(tk: yf.Ticker) -> dict:
     return {}
 
 
+def _usable_years(df: pd.DataFrame) -> int:
+    """핵심 필드(매출·영업현금흐름·CAPEX)가 모두 있는 연도 수.
+
+    행 수만 비교하면 '연도는 많지만 태그가 비어 항목이 전부 NaN'인
+    EDGAR/DART 데이터가 야후의 짧지만 온전한 4개년을 밀어내는 사고가 난다
+    — 그 경우 ROIC·FCF·재투자·해자가 한꺼번에 미채점으로 무너진다.
+    교체 판단은 반드시 이 가용연수 기준으로 한다."""
+    need = ["revenue", "ocf", "capex"]
+    cols = [c for c in need if c in df.columns]
+    if len(cols) < len(need):
+        return 0
+    return int(df[cols].notna().all(axis=1).sum())
+
+
 def _carry_shares(new_df: pd.DataFrame, old_df: pd.DataFrame) -> pd.DataFrame:
     """EDGAR/DART 데이터로 교체할 때 야후에만 있는 주식수 항목을 넘겨받는다.
 
@@ -316,13 +330,16 @@ def fetch(user_input: str) -> FinancialData:
                 try:
                     from data import sec_fetcher
                     sec_df, sec_msg = sec_fetcher.fetch_annual(tick)
-                    if len(sec_df) >= max(settings.SEC_MIN_YEARS, len(annual)):
+                    u_new, u_old = _usable_years(sec_df), _usable_years(annual)
+                    if u_new >= max(settings.SEC_MIN_YEARS, u_old):
                         annual = _derive(_carry_shares(sec_df, annual))
                         source = "SEC EDGAR (재무) + Yahoo Finance (주가·정보)"
                         msgs.append(sec_msg)
                     else:
-                        msgs.append(f"EDGAR가 {len(sec_df)}개년만 반환해 "
-                                    f"야후 데이터를 유지했습니다.")
+                        msgs.append(
+                            f"EDGAR 가용연수 {u_new}년(매출·현금흐름·CAPEX "
+                            f"동시 존재 기준) ≤ 야후 {u_old}년 — 비표준 태그로 "
+                            f"핵심 항목이 비어 야후 데이터를 유지했습니다.")
                 except Exception as e:
                     msgs.append(f"SEC EDGAR 조회 실패({type(e).__name__}: {e}) — "
                                 f"야후 {len(annual)}개년 데이터로 진행합니다.")
@@ -334,13 +351,16 @@ def fetch(user_input: str) -> FinancialData:
                     code = re.sub(r"\D", "", tick)[:6]
                     dart_df, dart_msg = dart_fetcher.fetch_annual(
                         code, years_back=settings.DART_YEARS_BACK)
-                    if len(dart_df) >= max(settings.DART_MIN_YEARS, len(annual)):
+                    u_new, u_old = _usable_years(dart_df), _usable_years(annual)
+                    if u_new >= max(settings.DART_MIN_YEARS, u_old):
                         annual = _derive(_carry_shares(dart_df, annual))
                         source = "DART OpenAPI (재무) + Yahoo Finance (주가·정보)"
                         msgs.append(dart_msg)
                     else:
-                        msgs.append(f"DART가 {len(dart_df)}개년만 반환해 "
-                                    f"야후 데이터를 유지했습니다.")
+                        msgs.append(
+                            f"DART 가용연수 {u_new}년(매출·현금흐름·CAPEX "
+                            f"동시 존재 기준) ≤ 야후 {u_old}년 — 핵심 계정 "
+                            f"미검출로 야후 데이터를 유지했습니다.")
                 except Exception as e:
                     msgs.append(f"DART 조회 실패({type(e).__name__}: {e}) — "
                                 f"야후 {len(annual)}개년 데이터로 진행합니다.")
