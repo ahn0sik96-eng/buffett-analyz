@@ -16,6 +16,7 @@ from analysis.reinvestment import compute_reinvestment
 from analysis.debt import compute_debt
 from analysis.valuation import compute_multiples
 from analysis.cyclicality import compute_cyclicality
+from analysis.moat import compute_moat
 from models.wacc import compute_wacc
 from models import dcf as dcf_m
 from models.financial_valuation import compute_financial_valuation
@@ -26,6 +27,7 @@ from scoring.risk_penalties import collect as collect_penalties
 from scoring.final_score import aggregate, classify
 from reports import narrative_report as nr
 from ui.formatting import pct
+from ui.korean import fix_josa_deep
 
 
 def pick_fcf0(annual, cf_summary, fcf_base_opt):
@@ -86,6 +88,7 @@ def analyze(fd, a: dict) -> dict:
     net_debt = debt_res["latest"]["net_debt"]
     mult = compute_multiples(fd, annual, fd.ttm, net_debt, rf)
     cyc_res = compute_cyclicality(annual, roic_res, cf_res, wacc)
+    moat_res = None if fd.is_financial else compute_moat(annual)
 
     fcf0, fcf0_label = pick_fcf0(annual, cf_res["summary"], a["fcf_base_opt"])
 
@@ -154,9 +157,16 @@ def analyze(fd, a: dict) -> dict:
         else:
             components["cyclicality"] = (None, WEIGHTS["cyclicality"],
                                          cyc_res["flags"][:1] or ["미채점"])
-        # 해자는 여전히 정성 데이터 필요 → 미구현
-        components["moat"] = (None, WEIGHTS["moat"],
-                              [f"미구현({NOT_IMPLEMENTED['moat']})"])
+        # 해자: 장기 이력이 있으면 간이(마진 지속성) 채점, 아니면 미채점.
+        # 정식 4단계(경쟁사 비교)의 근사치임을 근거 문구에 명시한다.
+        if moat_res and moat_res["score_frac"] is not None:
+            components["moat"] = (moat_res["score_frac"] * WEIGHTS["moat"],
+                                  WEIGHTS["moat"], moat_res["reasons"])
+        else:
+            components["moat"] = (
+                None, WEIGHTS["moat"],
+                (moat_res["flags"] if moat_res else None)
+                or [f"미구현({NOT_IMPLEMENTED['moat']})"])
 
     if fd.is_financial:
         # FCF수익률은 금융업에서 의미가 없으므로 전달하지 않는다.
@@ -178,8 +188,10 @@ def analyze(fd, a: dict) -> dict:
     cls = classify(scores["quality_norm"], scores["val_norm"],
                    components.get("debt"), z_zone, fd.is_financial,
                    roic_res["summary"]["years"])
-    concl = nr.conclusion(fd, scores, cls, scen, reverse, mult,
-                          roic_res, cf_res, re_res, debt_res, mos_target)
+    concl = fix_josa_deep(nr.conclusion(fd, scores, cls, scen, reverse, mult,
+                                        roic_res, cf_res, re_res, debt_res,
+                                        mos_target))
+    cls = fix_josa_deep(cls)
 
     return dict(
         fd=fd, cur=cur, msgs=msgs, data_shortage=data_shortage,
@@ -190,4 +202,5 @@ def analyze(fd, a: dict) -> dict:
         scen=scen, fx_sanity_msg=fx_sanity_msg, fair_base=fair_base, sens=sens,
         reverse=reverse, components=components, penalty_items=penalty_items,
         scores=scores, cls=cls, concl=concl, fin_val=fin_val,
+        moat_res=moat_res,
     )
