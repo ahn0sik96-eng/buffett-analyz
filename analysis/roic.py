@@ -97,12 +97,18 @@ def compute_roic(annual: pd.DataFrame, tax_fallback: float = 0.24,
             roic_ttm = ttm["ebit"] * (1 - eff_l) / ic_l
 
     mean_all = _f(r.mean()) if n else None
+    mean3 = mean_last(3) if n >= 3 else None
+    # 현재 WACC는 현재/근래 수익성과 비교해야 한다. 장기 평균 ROIC와
+    # 현재 금리·현재 beta 기반 WACC를 빼면 서로 다른 기간을 섞게 된다.
+    spread_roic = _f(roic_ttm) or mean3 or (_f(r.iloc[-1]) if n else None)
+    spread_basis = ("TTM" if _f(roic_ttm) is not None else
+                    "최근 3년 평균" if mean3 is not None else "최근 연도")
     summary = {
         "years": n,
         "period": f"{int(r.index[0])}–{int(r.index[-1])}" if n else "N/A",
         "latest": _f(r.iloc[-1]) if n else None,
         "ttm": _f(roic_ttm),
-        "mean3": mean_last(3) if n >= 3 else None,
+        "mean3": mean3,
         "mean5": mean_last(5) if n >= 5 else None,
         "mean_all": mean_all,
         "median": _f(r.median()) if n else None,
@@ -111,7 +117,8 @@ def compute_roic(annual: pd.DataFrame, tax_fallback: float = 0.24,
         "pct_ge_15": _f((r >= 0.15).mean()) if n else None,
         "pct_ge_20": _f((r >= 0.20).mean()) if n else None,
         "pct_gt_wacc": _f((r > wacc).mean()) if (n and wacc) else None,
-        "spread_wacc": (mean_all - wacc) if (mean_all is not None and wacc) else None,
+        "spread_wacc": (spread_roic - wacc) if (spread_roic is not None and wacc) else None,
+        "spread_basis": spread_basis,
         "spread_rf": (mean_all - rf) if (mean_all is not None and rf) else None,
         "trend": trend,                    # 연간 변화폭(소수). 0.01 = +1%p/년
         "ic_method": used,

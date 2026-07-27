@@ -30,6 +30,31 @@ def _slope(s: pd.Series):
     return _f(np.polyfit(np.arange(len(s)), s.values.astype(float), 1)[0] / scale)
 
 
+def _comparable_shares(s: pd.Series, max_years: int = 5) -> pd.Series:
+    """Return a recent, split-comparable share-count series.
+
+    EDGAR companyfacts keeps old 10-K share counts as originally filed.  A
+    later stock split is therefore not always reflected in the oldest facts
+    (Apple is a common example), so comparing the first available year with
+    the latest year can manufacture enormous "dilution".
+
+    Use at most the latest ``max_years + 1`` observations and discard the
+    portion before the most recent discontinuity.  A one-year change outside
+    0.5x–2.0x is treated as a split/unit break, not issuance or repurchase.
+    """
+    out = pd.to_numeric(s, errors="coerce").dropna()
+    out = out[out > 0].iloc[-(max_years + 1):]
+    if len(out) < 2:
+        return out
+
+    ratios = out / out.shift(1)
+    breaks = ratios[(ratios < 0.5) | (ratios > 2.0)]
+    if len(breaks):
+        last_break = breaks.index[-1]
+        out = out.loc[last_break:]
+    return out
+
+
 def compute_cashflow(annual: pd.DataFrame, ttm: dict | None = None,
                      shares_now: float | None = None) -> dict:
     df = annual
@@ -81,8 +106,12 @@ def compute_cashflow(annual: pd.DataFrame, ttm: dict | None = None,
             flags.append(f"{label} 3년 성장률({g_x:.1%})이 매출({g_rev3:.1%})을 크게 상회 — "
                          f"운전자본 악화 원인 확인 필요")
 
-    shv = sh.dropna()
+    shv = _comparable_shares(sh)
     share_chg = _f(shv.iloc[-1] / shv.iloc[0] - 1) if len(shv) >= 2 else None
+    share_period = (f"{int(shv.index[0])}–{int(shv.index[-1])}"
+                    if len(shv) >= 2 else None)
+    if sh.dropna().size >= 2 and len(shv) < 2:
+        flags.append("주식수 시계열에 액면분할·단위 단절이 있어 희석률을 N/A 처리")
     if share_chg is not None and share_chg > 0.02:
         risk_codes.add("SHARES_RISING")
 
@@ -103,8 +132,9 @@ def compute_cashflow(annual: pd.DataFrame, ttm: dict | None = None,
         "growth_std": _f(growth.std()) if len(growth) >= 2 else None,
         "neg_count": neg,
         "conv_avg": _f(conv.dropna().mean()) if conv.notna().any() else None,
-        "fcf_ps_cagr": cagr(fcf_ps),
+        "fcf_ps_cagr": cagr(fcf_ps.reindex(shv.index)) if len(shv) >= 2 else None,
         "share_change": share_chg,
+        "share_period": share_period,
         "sbc_ratio": sbc_ratio,
         "rev_cagr3": g_rev3,
     }
