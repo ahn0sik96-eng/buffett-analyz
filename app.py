@@ -494,7 +494,8 @@ with tabs[1]:
         ("15%↑ 연도 비율", pct(s["pct_ge_15"], 0)),
         ("20%↑ 연도 비율", pct(s["pct_ge_20"], 0)),
         ("WACC 초과 비율", pct(s["pct_gt_wacc"], 0)),
-        ("ROIC−WACC", "N/A" if s["spread_wacc"] is None
+        (f"{s.get('spread_basis', '최근')} ROIC−현재 WACC",
+         "N/A" if s["spread_wacc"] is None
          else f"{s['spread_wacc']*100:+.1f}%p"),
     ], MOBILE, per_row_desktop=4)
     if roic_res["decomposition"]:
@@ -522,7 +523,9 @@ with tabs[2]:
         ("FCF 마진(평균)", pct(s["margin_avg"])),
         ("FCF CAGR(기간)", pct(s["cagr_max"])),
         ("현금전환율(평균)", pct(s["conv_avg"], 0)),
-        ("주식수 변화", pct(s["share_change"])),
+        ("주식수 변화", pct(s["share_change"]),
+         f"최근 비교가능 기간 {s['share_period']}" if s.get("share_period") else
+         "액면분할·단위 단절 시 N/A"),
     ], MOBILE)
     st.markdown(safe_narrative(nr.fcf_text, cf_res))
     for f in cf_res["flags"]:
