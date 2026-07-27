@@ -16,17 +16,40 @@ import pandas as pd
 
 from config import settings
 
-FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
+FRED_CSV = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}&cosd={cosd}"
 _UA = {"User-Agent": "buffett-analyzer/1.4 (personal research)"}
 
+LOOKBACK_DAYS = 400        # 최신값만 필요하므로 최근 구간만 요청
+HTTP_TIMEOUT = 12.0
+HTTP_RETRIES = 2
 
-def _fred_latest(series_id: str, timeout: float = 6.0) -> tuple[float, str]:
-    """FRED 시계열의 최신 유효 관측치를 (소수 비율, 날짜) 로 반환."""
+
+def _fred_latest(series_id: str, timeout: float = HTTP_TIMEOUT) -> tuple[float, str]:
+    """FRED 시계열의 최신 유효 관측치를 (소수 비율, 날짜) 로 반환.
+
+    cosd(관측 시작일)를 붙여 최근 구간만 받는다 — 파라미터 없이 요청하면
+    DGS10은 1962년부터 전체 시계열(수만 행)을 내려주어 ReadTimeout이 난다.
+    """
+    import datetime as dt
+
     import requests  # yfinance 의존성으로 이미 설치됨
 
-    r = requests.get(FRED_CSV.format(sid=series_id), timeout=timeout,
-                     headers=_UA)
-    r.raise_for_status()
+    cosd = (dt.date.today() - dt.timedelta(days=LOOKBACK_DAYS)).isoformat()
+    url = FRED_CSV.format(sid=series_id, cosd=cosd)
+
+    last_err: Exception | None = None
+    r = None
+    for _ in range(HTTP_RETRIES):
+        try:
+            r = requests.get(url, timeout=timeout, headers=_UA)
+            r.raise_for_status()
+            break
+        except Exception as e:
+            last_err, r = e, None
+            continue
+    if r is None:
+        raise last_err or RuntimeError("요청 실패")
+
     df = pd.read_csv(io.StringIO(r.text))
     if df.empty or df.shape[1] < 2:
         raise ValueError("빈 응답")
@@ -50,8 +73,9 @@ def fetch_rf(country: str) -> dict:
     sid = settings.RF_SOURCES.get(country)
 
     if not settings.RF_AUTO_ENABLED or not sid:
-        return {"rf": fallback, "auto": False,
-                "label": f"기본값 {fallback:.2%} (자동 조회 대상 아님)"}
+        return {"rf": fallback, "auto": False, "reason": "none",
+                "label": f"기본값 {fallback:.2%} — 이 시장은 자동 조회 대상이 "
+                         f"아닙니다. 국고채 10년물 최신값을 직접 입력하세요."}
 
     lo, hi = settings.RF_SANE_RANGE
     try:
@@ -59,9 +83,9 @@ def fetch_rf(country: str) -> dict:
         if not (lo < v < hi):
             raise ValueError(f"이상값 {v:.4f}")
         note = " · 월별 시계열이라 최대 2개월 시차" if country == "KR" else ""
-        return {"rf": v, "auto": True,
+        return {"rf": v, "auto": True, "reason": "ok",
                 "label": f"FRED {sid} · {d} 기준 {v:.2%}{note}"}
     except Exception as e:                      # 네트워크·포맷·이상값 모두 폴백
-        return {"rf": fallback, "auto": False,
+        return {"rf": fallback, "auto": False, "reason": "fail",
                 "label": f"자동 조회 실패({type(e).__name__}) — "
                          f"기본값 {fallback:.2%} 사용, 직접 확인 권장"}

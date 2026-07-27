@@ -50,6 +50,16 @@ def load_rf(country: str) -> dict:
     return market_rates.fetch_rf(country)
 
 
+def mos_disp(v):
+    """안전마진 표시. 적정가치가 붕괴하면 (적정가-현재가)/적정가가 발산하므로
+    -200% 아래는 수치 대신 '산출 실패' 신호로 보여준다."""
+    if v is None:
+        return "N/A"
+    if v < -2.0:
+        return "< -200% 적정가치 산출 실패 의심"
+    return pct(v)
+
+
 def guess_country(raw: str) -> str:
     """입력값 → 국가코드. 데이터 수집기와 동일한 판별 규칙을 재사용한다.
 
@@ -123,8 +133,13 @@ with st.sidebar:
         "무위험수익률 (10년물, %)", value=_rfd["rf"] * 100,
         min_value=0.0, max_value=15.0, step=0.1,
         key=f"rf_{_k}_{int(rf_auto)}_{_rfd['rf']:.4f}") / 100
-    (st.caption if _rfd["auto"] else st.warning)(
-        ("✅ " if _rfd["auto"] else "⚠️ ") + _rfd["label"])
+    _r = _rfd.get("reason", "ok" if _rfd["auto"] else "fail")
+    if _r == "ok":
+        st.caption("✅ " + _rfd["label"])
+    elif _r == "none":
+        st.caption("ℹ️ " + _rfd["label"])
+    else:
+        st.warning("⚠️ " + _rfd["label"])
 
     _erp_def = settings.DEFAULT_ERP_BY_COUNTRY.get(country_hint,
                                                    settings.DEFAULT_ERP)
@@ -145,7 +160,14 @@ with st.sidebar:
                    "합계(Ke)가 9~10% 밴드에 들어오는지를 기준으로 보세요.")
     ic_method = st.selectbox("투하자본 산정", ["auto", "A", "B"],
                              help="A: 총자산−현금−무이자유동부채 / B: 자기자본+이자부부채−현금")
-    fcf_base_opt = st.selectbox("DCF 기준 FCF", ["3년 중앙값", "TTM", "최근 연도"])
+    fcf_base_opt = st.selectbox(
+        "DCF 기준 FCF",
+        ["3년 중앙값", "사이클 정규화 (시클리컬 권장)", "전체기간 중앙값",
+         "TTM", "최근 연도"],
+        help="반도체·소재처럼 사이클이 큰 업종에서 '3년 중앙값'은 최근 3년이 "
+             "사이클 어디에 있었는지에 결과가 좌우됩니다. 장기 이력이 있으면 "
+             "'사이클 정규화'(FCF마진 중앙값 x 최근 매출)가 정상이익에 더 "
+             "가깝습니다.")
     g_mode = st.selectbox("1단계 성장률(5년)", ["자동(과거 FCF CAGR 기반)", "수동"])
     g_manual = st.slider("수동 성장률 (%)", -10.0, 25.0, 6.0, 0.5) / 100
     _gT_def = settings.DEFAULT_TERMINAL_G_BY_COUNTRY.get(
@@ -329,7 +351,7 @@ mob.metric_row([
     ("밸류에이션", f"{scores['val_norm']:.0f}"
      if scores["val_norm"] is not None else "N/A"),
     ("적정가치(기준)", price_fmt(fair_base, fd.currency)),
-    ("안전마진(기준)", pct(scen["기준"]["mos"]) if scen else "N/A",
+    ("안전마진(기준)", mos_disp(scen["기준"]["mos"]) if scen else "N/A",
      f"목표 안전마진 {pct(mos_target,0)}"),
 ], MOBILE, per_row_desktop=4, per_row_mobile=2)
 
@@ -370,7 +392,7 @@ def render_financial_panel(fv, container_border=True):
             ("현재 PBR", xs(s["pbr_now"])),
             ("적정 PBR", xs(s["pb_fair"])),
             ("적정주가", price_fmt(s["fair"], fd.currency)),
-            ("안전마진", pct(s["mos"])),
+            ("안전마진", mos_disp(s["mos"])),
             ("연간 초과수익", money(s["excess_return"], cur)),
         ], MOBILE)
         for f in fv["flags"]:
@@ -580,7 +602,7 @@ with tabs[5]:
             "영구성장률": sdf["gT"].map(lambda v: pct(v)),
             "적정가치": sdf["fair"].map(lambda v: price_fmt(v, fd.currency)),
             "상승여력": sdf["upside"].map(lambda v: pct(v)),
-            "안전마진": sdf["mos"].map(lambda v: pct(v)),
+            "안전마진": sdf["mos"].map(mos_disp),
             "TV 비중": sdf["tv_share"].map(lambda v: pct(v, 0)),
         })
         st.dataframe(sdf_disp, use_container_width=True)

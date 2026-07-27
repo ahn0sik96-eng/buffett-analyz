@@ -29,11 +29,35 @@ from ui.formatting import pct
 
 
 def pick_fcf0(annual, cf_summary, fcf_base_opt):
+    """DCF 기준 FCF 선택.
+
+    EDGAR/DART 연동으로 12~20년 이력이 확보되면서 '최근 3년'은 오히려 사이클
+    위치에 결과가 좌우되는 선택지가 됐다. 시클리컬 종목은 사이클 정규화
+    (FCF마진 중앙값 x 최근 매출)를 써야 정상이익 기준선이 나온다.
+    """
     fcf_series = _g(annual, "fcf").dropna()
+    rev = _g(annual, "revenue")
+
     if fcf_base_opt == "TTM" and cf_summary.get("fcf_ttm"):
         return cf_summary["fcf_ttm"], "TTM"
     if fcf_base_opt == "최근 연도" and len(fcf_series):
         return float(fcf_series.iloc[-1]), "최근 연도"
+
+    if fcf_base_opt.startswith("전체기간") and len(fcf_series) >= 5:
+        return float(fcf_series.median()), f"전체 {len(fcf_series)}년 중앙값"
+
+    if fcf_base_opt.startswith("사이클 정규화"):
+        margin = (fcf_series / rev.reindex(fcf_series.index)) \
+            .replace([np.inf, -np.inf], np.nan).dropna()
+        rev_recent = rev.dropna()
+        if len(margin) >= 5 and len(rev_recent):
+            m = float(margin.median())
+            base_rev = float(rev_recent.iloc[-1])
+            return m * base_rev, (
+                f"사이클 정규화 — FCF마진 중앙값 {m:.1%}({len(margin)}년) "
+                f"x 최근 매출")
+        # 데이터 부족 → 아래 3년 중앙값으로 폴백
+
     if len(fcf_series):
         return float(fcf_series.iloc[-3:].median()), \
             f"최근 {min(3, len(fcf_series))}년 중앙값"
