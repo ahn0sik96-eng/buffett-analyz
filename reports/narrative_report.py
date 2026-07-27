@@ -31,8 +31,9 @@ def roic_text(rs: dict, wacc: float | None) -> str:
         t.append(f"추세는 연 {s['trend']*100:+.1f}%p로 {d}입니다.")
     if s.get("spread_wacc") is not None and wacc:
         ok = "초과해 가치를 창출" if s["spread_wacc"] > 0 else "하회해 가치 창출이 의문시"
-        t.append(f"WACC({pct(wacc)}) 대비 스프레드는 {s['spread_wacc']*100:+.1f}%p로 "
-                 f"자본비용을 {ok}됩니다.")
+        basis = s.get("spread_basis", "최근 실적")
+        t.append(f"{basis} ROIC와 현재 WACC({pct(wacc)})의 스프레드는 "
+                 f"{s['spread_wacc']*100:+.1f}%p로 자본비용을 {ok}하는 수준입니다.")
     if s["years"] < 10:
         t.append(f"*불확실성: {s['years']}개년 데이터로 10년 지속성 판단에는 한계가 있습니다.*")
     return " ".join(t)
@@ -55,7 +56,8 @@ def fcf_text(cs: dict) -> str:
         tail.append(f"FCF 적자 {s['neg_count']}회 발생.")
     if s.get("share_change") is not None:
         d = "감소(환원 우호적)" if s["share_change"] < 0 else "증가(희석 주의)"
-        tail.append(f"기간 중 주식수 {pct(abs(s['share_change']))} {d}.")
+        period = f"({s['share_period']}) " if s.get("share_period") else ""
+        tail.append(f"최근 비교가능 기간 {period}주식수 {pct(abs(s['share_change']))} {d}.")
     if s.get("sbc_ratio") is not None and s["sbc_ratio"] > 0.1:
         tail.append(f"주식보상은 FCF의 평균 {pct(s['sbc_ratio'],0)} — 조정 FCF 병행 확인 권장.")
     return head + (" " + " ".join(tail) if tail else "")

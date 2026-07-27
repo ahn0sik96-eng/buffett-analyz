@@ -31,7 +31,8 @@ def test_nopat_ic_roic():
     assert t.loc[2022, "roic"] == pytest.approx(112.0 / 710.0)
     s = res["summary"]
     assert s["mean_all"] == pytest.approx((0.16 + 112.0 / 710.0) / 2)
-    assert s["spread_wacc"] == pytest.approx(s["mean_all"] - 0.08)
+    assert s["spread_wacc"] == pytest.approx(s["latest"] - 0.08)
+    assert s["spread_basis"] == "최근 연도"
 
 
 def test_negative_ic_is_na():
