@@ -278,6 +278,25 @@ def fetch(user_input: str) -> FinancialData:
                 raise ValueError(f"{tick}: 재무제표를 찾을 수 없음")
             info = _safe_info(tk)
             msgs: list[str] = []
+            source = "Yahoo Finance"
+
+            # ── 미국 종목: EDGAR로 장기 이력 교체 시도 ──────────────────────
+            # 야후는 연간 4개년뿐이라 시클리컬 종목의 정상이익 추정이 불가능하다.
+            # 실패해도 야후 데이터로 계속 진행하되, 사유를 반드시 표기한다.
+            if country == "US" and settings.SEC_ENABLED:
+                try:
+                    from data import sec_fetcher
+                    sec_df, sec_msg = sec_fetcher.fetch_annual(tick)
+                    if len(sec_df) >= max(settings.SEC_MIN_YEARS, len(annual)):
+                        annual = _derive(sec_df)
+                        source = "SEC EDGAR (재무) + Yahoo Finance (주가·정보)"
+                        msgs.append(sec_msg)
+                    else:
+                        msgs.append(f"EDGAR가 {len(sec_df)}개년만 반환해 "
+                                    f"야후 데이터를 유지했습니다.")
+                except Exception as e:
+                    msgs.append(f"SEC EDGAR 조회 실패({type(e).__name__}: {e}) — "
+                                f"야후 {len(annual)}개년 데이터로 진행합니다.")
 
             price = _get_price(tk, info)
             shares = info.get("sharesOutstanding")
@@ -321,7 +340,7 @@ def fetch(user_input: str) -> FinancialData:
                 forward_pe=info.get("forwardPE"),
                 annual=annual, ttm=ttm_raw, price_history=hist,
                 is_financial=bool(is_fin), country=country, messages=msgs,
-                fx_adjusted=fx_adjusted,
+                fx_adjusted=fx_adjusted, source=source,
             )
         except Exception as e:                            # 다음 후보(.KQ 등) 시도
             last_err = e
