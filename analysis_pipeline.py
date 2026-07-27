@@ -9,7 +9,7 @@ import numpy as np
 
 from config import settings
 from config.scoring_rules import WEIGHTS, NOT_IMPLEMENTED
-from data.data_validator import validate
+from data.data_validator import validate, coverage_summary
 from analysis.roic import compute_roic, _g
 from analysis.cashflow import compute_cashflow
 from analysis.reinvestment import compute_reinvestment
@@ -30,7 +30,7 @@ from ui.formatting import pct
 from ui.korean import fix_josa_deep
 
 
-def pick_fcf0(annual, cf_summary, fcf_base_opt):
+def pick_fcf0(annual, cf_summary, fcf_base_opt, cyc_res=None):
     """DCF 기준 FCF 선택.
 
     EDGAR/DART 연동으로 12~20년 이력이 확보되면서 '최근 3년'은 오히려 사이클
@@ -48,15 +48,18 @@ def pick_fcf0(annual, cf_summary, fcf_base_opt):
     if fcf_base_opt.startswith("전체기간") and len(fcf_series) >= 5:
         return float(fcf_series.median()), f"전체 {len(fcf_series)}년 중앙값"
 
-    if fcf_base_opt.startswith("사이클 정규화"):
+    auto_cyclical = (fcf_base_opt == "3년 중앙값" and cyc_res and
+                     cyc_res.get("summary", {}).get("level") == "경기 민감")
+    if fcf_base_opt.startswith("사이클 정규화") or auto_cyclical:
         margin = (fcf_series / rev.reindex(fcf_series.index)) \
             .replace([np.inf, -np.inf], np.nan).dropna()
         rev_recent = rev.dropna()
         if len(margin) >= 5 and len(rev_recent):
             m = float(margin.median())
             base_rev = float(rev_recent.iloc[-1])
+            prefix = "경기민감 자동 정규화" if auto_cyclical else "사이클 정규화"
             return m * base_rev, (
-                f"사이클 정규화 — FCF마진 중앙값 {m:.1%}({len(margin)}년) "
+                f"{prefix} — FCF마진 중앙값 {m:.1%}({len(margin)}년) "
                 f"x 최근 매출")
         # 데이터 부족 → 아래 3년 중앙값으로 폴백
 
@@ -71,6 +74,7 @@ def analyze(fd, a: dict) -> dict:
     g_mode, g_manual, gT, mos_target). 반환: 렌더링에 필요한 전체 결과 dict."""
     rf, erp, tax_fb = a["rf"], a["erp"], a["tax_fb"]
     msgs, data_shortage = validate(fd)
+    coverage = coverage_summary(fd)
     annual = fd.annual
     cur = fd.fin_currency or fd.currency
     latest = annual.iloc[-1]
@@ -90,13 +94,19 @@ def analyze(fd, a: dict) -> dict:
     cyc_res = compute_cyclicality(annual, roic_res, cf_res, wacc)
     moat_res = None if fd.is_financial else compute_moat(annual)
 
-    fcf0, fcf0_label = pick_fcf0(annual, cf_res["summary"], a["fcf_base_opt"])
+    fcf0, fcf0_label = pick_fcf0(annual, cf_res["summary"],
+                                 a["fcf_base_opt"], cyc_res)
 
     if a["g_mode"].startswith("자동"):
-        g_auto = cf_res["summary"].get("cagr5") or cf_res["summary"].get("cagr_max") \
-            or cf_res["summary"].get("cagr3")
-        g1 = float(np.clip(g_auto, -0.02, 0.15)) if g_auto is not None else 0.05
-        g1_label = f"자동 {pct(g1)} (과거 FCF CAGR 기반, 상하한 −2%~15%)"
+        cs = cf_res["summary"]
+        candidates = [cs.get("fcf_ps_cagr5"), cs.get("log_growth5"),
+                      cs.get("cagr5")]
+        candidates = [v for v in candidates if v is not None and np.isfinite(v)]
+        g_auto = float(np.median(candidates)) if candidates else (
+            cs.get("cagr_max") or cs.get("cagr3"))
+        g1 = float(np.clip(g_auto, -0.02, 0.12)) if g_auto is not None else 0.05
+        g1_label = (f"자동 {pct(g1)} (주당 FCF·로그추세·5년 CAGR 중앙값, "
+                    f"상하한 −2%~12%)")
         g1_caution = (g_auto is not None and g_auto > 0.12)
     else:
         g1, g1_label = a["g_manual"], f"수동 {pct(a['g_manual'])}"
@@ -202,5 +212,5 @@ def analyze(fd, a: dict) -> dict:
         scen=scen, fx_sanity_msg=fx_sanity_msg, fair_base=fair_base, sens=sens,
         reverse=reverse, components=components, penalty_items=penalty_items,
         scores=scores, cls=cls, concl=concl, fin_val=fin_val,
-        moat_res=moat_res,
+        moat_res=moat_res, coverage=coverage,
     )
