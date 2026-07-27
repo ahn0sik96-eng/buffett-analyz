@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 import numpy as np
 import pandas as pd
@@ -87,6 +88,8 @@ class FinancialData:
     price_history: pd.Series | None
     is_financial: bool
     country: str                    # "US" | "KR" | "OTHER"
+    benchmark_history: pd.Series | None = None
+    benchmark_symbol: str | None = None
     source: str = "Yahoo Finance"
     messages: list[str] = field(default_factory=list)
     fx_adjusted: bool = False        # 재무제표 통화를 주가 통화로 환산했는지 여부
@@ -192,6 +195,29 @@ def _safe_info(tk: yf.Ticker) -> dict:
         if attempt == 0:
             _t.sleep(0.6)
     return {}
+
+
+_BENCHMARKS = {
+    "US": ("SPY", "S&P 500"),
+    "KR": ("^KS11", "KOSPI"),
+    "OTHER": ("ACWI", "글로벌 주식"),
+}
+
+
+@lru_cache(maxsize=3)
+def _benchmark_history(country: str) -> tuple[str, pd.Series | None]:
+    """매수시점 상대강도용 주봉 벤치마크.
+
+    비교 모드에서 종목마다 같은 지수를 다시 내려받지 않도록 프로세스 단위로
+    캐시한다. 실패해도 절대 추세만으로 판정할 수 있으므로 예외를 전파하지 않는다.
+    """
+    symbol, _label = _BENCHMARKS.get(country, _BENCHMARKS["OTHER"])
+    try:
+        hist = yf.Ticker(symbol).history(period="5y", interval="1wk")["Close"]
+        hist = pd.to_numeric(hist, errors="coerce").dropna()
+        return symbol, hist if len(hist) else None
+    except Exception:
+        return symbol, None
 
 
 def _usable_years(df: pd.DataFrame) -> int:
@@ -453,6 +479,11 @@ def fetch(user_input: str) -> FinancialData:
             except Exception:
                 hist = None
                 msgs.append("주가 이력 조회 실패(차트 생략)")
+            benchmark_symbol, benchmark_hist = _benchmark_history(country)
+            if benchmark_hist is None:
+                msgs.append(
+                    f"시장 벤치마크({benchmark_symbol}) 조회 실패 — 매수시점은 "
+                    "절대 추세만으로 판정하고 상대강도는 N/A 처리합니다.")
 
             # ── 시세 정합 가드 ──────────────────────────────────────────
             # 야후 쿼트는 액면분할·무상증자 후 조정을 놓치고 스테일 값을
@@ -491,7 +522,11 @@ def fetch(user_input: str) -> FinancialData:
                 trailing_pe=info.get("trailingPE"),
                 forward_pe=info.get("forwardPE"),
                 annual=annual, ttm=ttm_raw, price_history=hist,
-                is_financial=bool(is_fin), country=country, messages=msgs,
+                is_financial=bool(is_fin), country=country,
+                benchmark_history=(benchmark_hist.copy()
+                                   if benchmark_hist is not None else None),
+                benchmark_symbol=benchmark_symbol,
+                messages=msgs,
                 fx_adjusted=fx_adjusted, source=source,
             )
         except Exception as e:                            # 다음 후보(.KQ 등) 시도

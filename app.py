@@ -287,6 +287,8 @@ if mode == "비교·워치리스트":
             r = analyze(fd, _a)
             sc = r["scores"]
             cov = r["coverage"]
+            bt = r["buy_timing"]
+            tr = bt["trend"]
             base = r["scen"]["기준"] if r["scen"] else {}
             if not base and r.get("fin_val"):
                 base = {"mos": r["fin_val"]["summary"].get("mos")}
@@ -296,6 +298,9 @@ if mode == "비교·워치리스트":
                 "분류": r["cls"][0],
                 "종합": sc["total_norm"],
                 "등급": sc["grade"],
+                "매수시점": bt["label"],
+                "매수코드": bt["code"],
+                "가격추세": tr.get("label"),
                 "질": sc["quality_norm"],
                 "밸류": sc["val_norm"],
                 "ROIC(평균)": r["roic_res"]["summary"].get("mean_all"),
@@ -303,6 +308,9 @@ if mode == "비교·워치리스트":
                 "순부채/EBITDA": r["debt_res"]["latest"].get("nd_ebitda"),
                 "안전마진(기준)": base.get("mos"),
                 "내재성장률": r["reverse"]["implied_g"] if r["reverse"] else None,
+                "13주수익률": tr.get("ret13"),
+                "시장대비(13주)": tr.get("relative13"),
+                "52주고점대비": tr.get("drawdown52"),
                 "경고": len(r["debt_res"].get("warnings", [])),
                 "국가": fd.country,
                 "데이터품질": cov["grade"],
@@ -332,38 +340,48 @@ if mode == "비교·워치리스트":
                         key=lambda s: pd.to_numeric(s, errors="coerce"),
                         na_position="last").reset_index(drop=True)
 
-    disp = df.copy()
+    disp = df.drop(columns=["매수코드"]).copy()
     for c in ("종합", "질", "밸류"):
         disp[c] = disp[c].map(lambda v: "N/A" if v is None else f"{v:.0f}")
     for c in ("ROIC(평균)", "FCF마진", "안전마진(기준)", "내재성장률",
+              "13주수익률", "시장대비(13주)", "52주고점대비",
               "적용rf", "적용ERP"):
         disp[c] = disp[c].map(lambda v: pct(v))
     disp["순부채/EBITDA"] = disp["순부채/EBITDA"].map(lambda v: xs(v))
     if MOBILE:
         # 휴대폰: 핵심 열만 (가로 스크롤 최소화). 전체는 CSV로 확인
-        disp = disp[["티커", "종합", "등급", "질", "밸류", "안전마진(기준)"]]
+        disp = disp[["티커", "종합", "등급", "매수시점", "가격추세",
+                     "질", "밸류", "안전마진(기준)"]]
         st.caption("📱 모바일 보기 — 핵심 열만 표시합니다. 전체 지표는 아래 CSV를 받거나 "
                    "사이드바에서 모바일 보기를 끄세요.")
     st.dataframe(disp, use_container_width=True, hide_index=True)
     st.caption("‘질’은 밸류에이션을 제외한 기업 품질 환산점수 — 이 값이 높은데 ‘밸류’가 "
                "낮으면 ‘좋은데 비싼’ 워치리스트 후보입니다. ‘내재성장률’은 현 주가가 "
                "정당화되려면 필요한 5년 FCF 성장률의 수학적 역산치입니다. 혼합 국가 "
-               "비교에서는 국가별 rf·ERP·영구성장률을 자동 적용합니다.")
+               "비교에서는 국가별 rf·ERP·영구성장률을 자동 적용합니다. "
+               "‘매수시점’은 기업등급과 별도로 13·40주 추세, 시장 대비 상대강도, "
+               "안전마진, 최근 재무 둔화를 함께 본 규칙 기반 보조판정입니다.")
 
-    # 워치리스트 후보 자동 추림: 질 높은데 밸류 낮은
-    cand = df[(pd.to_numeric(df["질"], errors="coerce") >= 75) &
-              (pd.to_numeric(df["밸류"], errors="coerce") < 55)]
-    if len(cand):
-        st.markdown("**⭐ 워치리스트 후보 (질 우수·현재 가격 부담):** " +
-                    ", ".join(cand["티커"].tolist()) +
-                    " — 조정 시 매수 검토 대상")
+    ready = df[df["매수코드"].isin(
+        ["ACCUMULATE", "BASE_CONFIRMING", "WATCH_ENTRY"])]
+    if len(ready):
+        st.markdown("**🟢 매수시점 후보:** " +
+                    ", ".join(f"{r['티커']}({r['매수시점']})"
+                              for _, r in ready.iterrows()))
+    down = df[(df["매수코드"] == "WAIT_TREND") &
+              (pd.to_numeric(df["질"], errors="coerce") >= 75)]
+    if len(down):
+        st.markdown("**🟠 우량하지만 하락 추세 대기:** " +
+                    ", ".join(down["티커"].tolist()) +
+                    " — 13주선 회복과 저점 안정 확인 필요")
 
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button("📥 비교표 CSV 다운로드", data=csv,
                        file_name="comparison.csv", mime="text/csv")
     st.divider()
     st.caption("본 결과는 공개 데이터 기반 자동 계산이며 투자 조언이 아닙니다. "
-               "동일 가정을 모든 종목에 적용했으므로 개별 종목의 특수성은 단일 분석에서 확인하세요.")
+               "매수시점 분류는 바닥이나 미래 수익률을 예측하지 않습니다. 동일 가정을 "
+               "모든 종목에 적용했으므로 개별 종목의 특수성은 단일 분석에서 확인하세요.")
     st.stop()
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -402,6 +420,7 @@ components = R["components"]; penalty_items = R["penalty_items"]
 scores = R["scores"]; cls = R["cls"]; concl = R["concl"]
 fin_val = R.get("fin_val")
 coverage = R["coverage"]
+buy_timing = R["buy_timing"]
 penalty_total = scores["penalty"]
 
 # ── 화면 2: 종합 요약 헤더 ─────────────────────────────────────────────────
@@ -426,9 +445,43 @@ mob.metric_row([
     ("적정가치(기준)", price_fmt(fair_base, fd.currency)),
     ("안전마진(기준)", mos_disp(scen["기준"]["mos"]) if scen else "N/A",
      f"목표 안전마진 {pct(mos_target,0)}"),
+    ("매수시점", buy_timing["label"], buy_timing["trend"]["label"]),
 ], MOBILE, per_row_desktop=4, per_row_mobile=2)
 
 st.info(f"**분류(프로그램의 추론):** {cls[0]} — {cls[1]}")
+_timing_message = (
+    f"**매수시점(등급과 별도):** {buy_timing['label']} — "
+    f"{buy_timing['summary']}"
+)
+{
+    "success": st.success,
+    "warning": st.warning,
+    "error": st.error,
+    "info": st.info,
+}.get(buy_timing["tone"], st.info)(_timing_message)
+_trend = buy_timing["trend"]
+_benchmark = getattr(fd, "benchmark_symbol", None)
+mob.metric_row([
+    ("가격 추세", _trend["label"],
+     "추세점수 N/A" if _trend.get("score") is None
+     else f"추세점수 {_trend['score']}/100"),
+    ("13주 수익률", pct(_trend.get("ret13"))),
+    (f"{_benchmark or '시장'} 대비 13주", pct(_trend.get("relative13"))),
+    ("52주 고점 대비", pct(_trend.get("drawdown52"))),
+], MOBILE, per_row_desktop=4, per_row_mobile=2)
+st.caption(
+    f"가치 조건: {buy_timing['valuation']['reason']} · "
+    f"펀더멘털: {buy_timing['fundamental']['level']}"
+)
+with st.expander("매수시점 판정 근거 · 다음 확인 조건"):
+    st.markdown("**가격 추세 근거**")
+    for _reason in _trend.get("reasons", []):
+        st.markdown(f"- {_reason}")
+    st.markdown("**다음 단계로 넘어가기 위한 조건**")
+    for _checkpoint in buy_timing["checkpoints"]:
+        st.markdown(f"- {_checkpoint}")
+    st.caption("이 판정은 13·40주 주봉과 최신 공개 재무를 이용한 규칙 기반 "
+               "보조지표이며 바닥·반등·수익률을 예측하지 않습니다.")
 st.markdown(f"**핵심 판단:** {concl['thesis']}")
 if scores.get("partial_note"):
     st.warning("⚠️ " + scores["partial_note"] +
@@ -675,11 +728,12 @@ with tabs[5]:
         render_financial_panel(fin_val, container_border=False)
         _fv = fin_val["summary"].get("fair")
         if _fv and fd.price:
-            st.markdown("**매수가격 구간 (적정주가 대비)**")
+            st.markdown("**가격 기준 매수 검토 구간 (시점 판정과 별도)**")
             st.dataframe(dcf_m.price_zones(_fv, fd.price),
                          use_container_width=True, hide_index=True)
             st.caption(f"목표 안전마진 {pct(mos_target,0)} 기준 매수 검토가: "
-                       f"{price_fmt(_fv*(1-mos_target), fd.currency)} 이하")
+                       f"{price_fmt(_fv*(1-mos_target), fd.currency)} 이하 · "
+                       f"현재 시점 판정: {buy_timing['label']}")
     else:
         st.subheader("DCF")
         st.caption(f"기준 FCF: {money(fcf0, cur)} ({fcf0_label}) · "
@@ -737,11 +791,12 @@ with tabs[5]:
         if sens is not None:
             mob.chart(charts.sens_heatmap(sens), MOBILE)
         if fair_base and fd.price:
-            st.markdown("**매수가격 구간 (기준 시나리오 적정가치 대비)**")
+            st.markdown("**가격 기준 매수 검토 구간 (시점 판정과 별도)**")
             st.dataframe(dcf_m.price_zones(fair_base, fd.price),
                          use_container_width=True, hide_index=True)
             st.caption(f"목표 안전마진 {pct(mos_target,0)} 기준 매수 검토가: "
-                       f"{price_fmt(fair_base*(1-mos_target), fd.currency)} 이하")
+                       f"{price_fmt(fair_base*(1-mos_target), fd.currency)} 이하 · "
+                       f"현재 시점 판정: {buy_timing['label']}")
     elif not fd.is_financial:
         st.warning("기준 FCF ≤ 0 또는 데이터 부족 — DCF는 임의값을 대입하지 않고 "
                    "N/A 처리합니다(명세 18·21).")
@@ -771,6 +826,9 @@ with tabs[6]:
         with b:
             _bullets("약점", concl["weaknesses"])
             _bullets("투자 논리 훼손 조건", concl["breakers"])
+    st.divider()
+    _bullets(f"{buy_timing['label']} — 매수 전 확인 조건",
+             buy_timing["checkpoints"])
     if scen and fair_base:
         st.divider()
         st.markdown(f"적정가치 범위(보수~낙관): "
@@ -791,6 +849,9 @@ with tabs[7]:
         "DCF 기준 FCF": f"{money(fcf0, cur)} ({fcf0_label})",
         "1단계 성장률": g1_label, "영구성장률": pct(gT),
         "목표 안전마진": pct(mos_target, 0),
+        "매수시점 판정": buy_timing["label"],
+        "가격 추세": buy_timing["trend"]["label"],
+        "매수시점 판정 규칙": "13·40주 추세 + 시장 상대강도 + 안전마진 + 최근 재무",
         "분석기간": roic_res["summary"]["period"],
     }
     st.markdown("**가정(Assumptions)**")
@@ -798,7 +859,7 @@ with tabs[7]:
                                "값": assumptions.values()}),
                  use_container_width=True, hide_index=True)
     xls = build_excel(fd, roic_res, cf_res, re_res, debt_res, mult, scen, sens,
-                      scores, penalty_items, assumptions)
+                      scores, penalty_items, buy_timing, assumptions)
     st.download_button("📥 Excel 보고서 다운로드", data=xls,
                        file_name=f"{fd.ticker}_analysis.xlsx",
                        mime="application/vnd.openxmlformats-officedocument."

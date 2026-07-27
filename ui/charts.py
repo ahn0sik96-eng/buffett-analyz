@@ -92,6 +92,18 @@ def sens_heatmap(df: pd.DataFrame):
 
 
 def price_chart(hist: pd.Series):
-    fig = go.Figure(go.Scatter(x=hist.index, y=hist.values, mode="lines",
-                               line=dict(color=INK), name="종가"))
-    return _base(fig, "주가 (5년)")
+    """주봉 가격과 매수시점 분류에 쓰는 13·40주 이동평균."""
+    price = pd.to_numeric(hist, errors="coerce").dropna()
+    ma13 = price.rolling(13).mean()
+    ma40 = price.rolling(40).mean()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=price.index, y=price.values, mode="lines",
+        line=dict(color=INK, width=2), name="주봉 종가"))
+    fig.add_trace(go.Scatter(
+        x=ma13.index, y=ma13.values, mode="lines",
+        line=dict(color=ACCENT, width=1.8), name="13주선"))
+    fig.add_trace(go.Scatter(
+        x=ma40.index, y=ma40.values, mode="lines",
+        line=dict(color="#8B6F47", width=1.6, dash="dash"), name="40주선"))
+    return _base(fig, "주가 추세 (5년 주봉)")

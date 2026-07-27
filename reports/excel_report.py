@@ -13,10 +13,20 @@ def _kv(d: dict) -> pd.DataFrame:
     return pd.DataFrame({"항목": list(d.keys()), "값": ["N/A" if v is None else str(v) for v in d.values()]})
 
 
+def _pct(v) -> str:
+    try:
+        return f"{float(v):.1%}" if pd.notna(v) else "N/A"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
 def build_excel(fd, roic_res, cf_res, re_res, debt_res, mult, scen, sens,
-                scores, penalties, assumptions: dict) -> bytes:
+                scores, penalties, buy_timing, assumptions: dict) -> bytes:
     bio = BytesIO()
     with pd.ExcelWriter(bio, engine="openpyxl") as xw:
+        trend = buy_timing.get("trend", {})
+        valuation = buy_timing.get("valuation", {})
+        fundamental = buy_timing.get("fundamental", {})
         summary = {
             "기업명": fd.name, "티커": fd.ticker, "통화": fd.currency,
             "현재주가": fd.price, "시가총액": fd.market_cap,
@@ -27,8 +37,40 @@ def build_excel(fd, roic_res, cf_res, re_res, debt_res, mult, scen, sens,
             "밸류에이션(환산)": scores.get("val_norm"),
             "감점 합계": scores.get("penalty"),
             "부분평가 주석": scores.get("partial_note"),
+            "매수시점 판정": buy_timing.get("label"),
+            "가격 추세": trend.get("label"),
+            "매수시점 요약": buy_timing.get("summary"),
         }
         _kv(summary).to_excel(xw, sheet_name="Summary", index=False)
+
+        timing_summary = {
+            "최종 판정": buy_timing.get("label"),
+            "판정 코드": buy_timing.get("code"),
+            "요약": buy_timing.get("summary"),
+            "가격 추세": trend.get("label"),
+            "추세점수": trend.get("score"),
+            "13주 수익률": _pct(trend.get("ret13")),
+            "26주 수익률": _pct(trend.get("ret26")),
+            f"{getattr(fd, 'benchmark_symbol', None) or '시장'} 대비 13주":
+                _pct(trend.get("relative13")),
+            "52주 고점 대비": _pct(trend.get("drawdown52")),
+            "안전마진": _pct(valuation.get("mos")),
+            "가치 조건": valuation.get("reason"),
+            "펀더멘털": fundamental.get("level"),
+            "펀더멘털 주의사항":
+                ", ".join(fundamental.get("cautions", [])) or "없음",
+            "판정 한계": "규칙 기반 보조지표이며 바닥·반등·수익률을 예측하지 않음",
+        }
+        timing_frame = _kv(timing_summary)
+        timing_frame.to_excel(xw, sheet_name="Buy Timing", index=False)
+        check_frame = pd.DataFrame({
+            "다음 확인 조건": buy_timing.get("checkpoints", []) or ["N/A"],
+        })
+        check_frame.to_excel(
+            xw, sheet_name="Buy Timing", index=False,
+            startrow=len(timing_frame) + 2,
+        )
+
         fd.annual.to_excel(xw, sheet_name="Financial Statements")
         roic_res["table"].to_excel(xw, sheet_name="ROIC")
         cf_res["table"].to_excel(xw, sheet_name="FCF")

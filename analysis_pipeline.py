@@ -17,6 +17,7 @@ from analysis.debt import compute_debt
 from analysis.valuation import compute_multiples
 from analysis.cyclicality import compute_cyclicality
 from analysis.moat import compute_moat
+from analysis.buy_timing import classify_buy_timing
 from models.wacc import compute_wacc
 from models import dcf as dcf_m
 from models.financial_valuation import compute_financial_valuation
@@ -194,6 +195,19 @@ def analyze(fd, a: dict) -> dict:
     penalty_total, penalty_items = collect_penalties(risk_codes, data_shortage)
 
     scores = aggregate(components, penalty_total)
+    buy_timing = classify_buy_timing(
+        price_history=fd.price_history,
+        benchmark_history=getattr(fd, "benchmark_history", None),
+        current_price=fd.price,
+        fair_value=fair_base,
+        mos_target=mos_target,
+        quality_norm=scores.get("quality_norm"),
+        val_norm=scores.get("val_norm"),
+        annual=annual,
+        ttm=fd.ttm,
+        roic_res=roic_res,
+        risk_codes=risk_codes,
+    )
     z_zone = debt_res["altman"]["zone"] if debt_res.get("altman") else None
     cls = classify(scores["quality_norm"], scores["val_norm"],
                    components.get("debt"), z_zone, fd.is_financial,
@@ -212,5 +226,5 @@ def analyze(fd, a: dict) -> dict:
         scen=scen, fx_sanity_msg=fx_sanity_msg, fair_base=fair_base, sens=sens,
         reverse=reverse, components=components, penalty_items=penalty_items,
         scores=scores, cls=cls, concl=concl, fin_val=fin_val,
-        moat_res=moat_res, coverage=coverage,
+        moat_res=moat_res, coverage=coverage, buy_timing=buy_timing,
     )
