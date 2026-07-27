@@ -49,6 +49,17 @@ STATUS_MSG = {
     "901": "사용자 계정의 개인정보보유기간이 만료되었습니다.",
 }
 
+# ── 총차입금 구성 계정 (재무상태표, 계정명 정확 일치·공백 제거 기준) ────────
+# IFRS 표준계정에 '총차입금' 합계가 없어 구성 항목을 직접 합산한다.
+# 부모 계정('차입금' 단독 등)은 자식과 이중계상되므로 넣지 않는다.
+# 같은 이름이 유동·비유동에 각각 나오면(예: '사채', '리스부채') 둘 다 합산
+# — 서로 다른 줄이므로 그것이 맞다.
+DEBT_COMPONENT_NAMES = {
+    "단기차입금", "장기차입금", "유동성장기차입금", "유동성장기부채",
+    "사채", "유동성사채", "단기사채", "전환사채", "신주인수권부사채",
+    "교환사채", "리스부채", "유동리스부채", "비유동리스부채", "금융리스부채",
+}
+
 # ── 표준항목 → (IFRS account_id 후보, 한글 계정명 후보) ─────────────────────
 # account_id는 2019년경 'ifrs_' → 'ifrs-full_' 로 접두사가 바뀌어 둘 다 넣는다.
 TAGS: dict[str, tuple[list[str], list[str]]] = {
@@ -191,6 +202,19 @@ def _parse_report(items: list[dict], year: int) -> dict[int, dict[str, float]]:
                 if np.isfinite(v) and field not in out[y]:
                     out[y][field] = v
             break                          # 항목당 첫 매칭만 채택
+
+    # 총차입금 = 차입금·사채·리스부채 구성 계정 합산(재무상태표만)
+    for it in items:
+        if (it.get("sj_div") or "").upper() != "BS":
+            continue
+        nm = (it.get("account_nm") or "").strip().replace(" ", "")
+        if nm not in DEBT_COMPONENT_NAMES:
+            continue
+        for y, key in cols:
+            v = _amt(it.get(key))
+            if np.isfinite(v):
+                out[y]["total_debt"] = out[y].get("total_debt", 0.0) + v
+
     return {y: d for y, d in out.items() if d}
 
 
@@ -251,6 +275,8 @@ def fetch_annual(stock_code: str, years_back: int = 12
     yrs = df.index.tolist()
     msg = (f"DART OpenAPI {len(yrs)}개년({min(yrs)}~{max(yrs)}) 적용 · "
            f"고유번호 {corp} · 사업보고서(연결우선) 기준")
-    if "total_debt" in df and df["total_debt"].isna().all():
-        msg += " · 총차입금은 표준계정에 없어 순부채는 현금 기준 근사"
+    if "total_debt" in df and df["total_debt"].notna().any():
+        msg += " · 총차입금은 차입금·사채·리스부채 계정명 합산(근사)"
+    else:
+        msg += " · 총차입금 계정 미검출 — 순부채는 현금 기준 근사"
     return df, msg
