@@ -50,6 +50,23 @@ def load_rf(country: str) -> dict:
     return market_rates.fetch_rf(country)
 
 
+def clean_single_ticker(raw: str) -> tuple[str, str | None]:
+    """단일 분석 입력 정제 — 식별자 뭉치에서 첫 토큰만 쓴다.
+
+    금융사이트에서 복사하면 '058470.KS,0P0000ASU1,98886'처럼 야후 티커·
+    모닝스타 ID·내부코드가 콤마로 붙어 온다. 거래 티커는 항상 첫 토큰이다.
+    정제 없이 통과시키면 야후가 엉뚱한 인스트루먼트의 시세를 돌려줄 수 있다.
+    """
+    import re as _re
+    toks = [t for t in _re.split(r"[,\s]+", (raw or "").strip()) if t]
+    if not toks:
+        return "", None
+    if len(toks) == 1:
+        return toks[0], None
+    return toks[0], (f"입력에서 식별자 {len(toks)}개 감지 — 첫 번째 "
+                     f"'{toks[0]}'만 사용합니다.")
+
+
 def safe_narrative(fn, *args):
     """서술 문장 생성 가드.
 
@@ -336,7 +353,10 @@ if not ticker_in:
 
 try:
     with st.spinner("재무데이터 수집 중…"):
-        fd = load(ticker_in.strip())
+        _tick, _tick_note = clean_single_ticker(ticker_in)
+        if _tick_note:
+            st.info("ℹ️ " + _tick_note)
+        fd = load(_tick)
         R = analyze(fd, ASSUMPTIONS)
 except Exception as e:
     st.error(str(e))

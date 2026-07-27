@@ -265,7 +265,15 @@ def resolve_candidates(user_input: str) -> tuple[list[str], str]:
         return [tu + sfx for sfx in settings.KR_SUFFIXES], "KR"
     if tu.endswith(".KS") or tu.endswith(".KQ"):
         return [tu], "KR"
-    return [tu], "US" if re.fullmatch(r"[A-Z.\-]{1,10}", tu) else "OTHER"
+    if re.fullmatch(r"[A-Z.\-]{1,10}", tu):
+        # 클래스 주식 표기 정규화 — 언론·거래소는 'BRK.B'(점), 야후는
+        # 'BRK-B'(하이픈)를 쓴다. 점 표기가 들어오면 하이픈 변형을 먼저
+        # 시도한다(야후가 점 표기에 빈 재무제표를 돌려주므로).
+        cands = ([tu.replace(".", "-")] if "." in tu else []) + [tu]
+        seen: set = set()
+        cands = [c for c in cands if not (c in seen or seen.add(c))]
+        return cands, "US"
+    return [tu], "OTHER"
 
 
 def _fx_rate(fin_currency: str, currency: str) -> float | None:
@@ -445,6 +453,30 @@ def fetch(user_input: str) -> FinancialData:
             except Exception:
                 hist = None
                 msgs.append("주가 이력 조회 실패(차트 생략)")
+
+            # ── 시세 정합 가드 ──────────────────────────────────────────
+            # 야후 쿼트는 액면분할·무상증자 후 조정을 놓치고 스테일 값을
+            # 돌려주는 경우가 있다(예: 리노공업 5:1 분할). 이력(차트 API)은
+            # 분할 조정이 되므로, 현재가가 최근 종가의 2배를 벗어나면
+            # 쿼트를 버리고 최근 종가로 대체한다 — 틀린 가격으로 안전마진을
+            # 계산하는 것보다 1주 이내 종가가 항상 낫다.
+            if price and hist is not None and len(hist):
+                try:
+                    _last = float(hist.dropna().iloc[-1])
+                except Exception:
+                    _last = None
+                if _last and _last > 0:
+                    _ratio = price / _last
+                    if not (0.5 <= _ratio <= 2.0):
+                        msgs.append(
+                            f"⚠️ 야후 현재가({price:,.0f})가 최근 종가"
+                            f"({_last:,.0f})의 {_ratio:.1f}배 — 액면분할·"
+                            f"무상증자 등 기업행동 미반영 스테일 쿼트로 보고 "
+                            f"현재가를 최근 종가로 대체했습니다. 실제 시세와 "
+                            f"발행주식수를 증권사 앱에서 교차 확인하세요.")
+                        price = _last
+                        if shares:
+                            mcap = price * shares
 
             return FinancialData(
                 ticker=tick,

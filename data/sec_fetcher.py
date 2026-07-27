@@ -139,11 +139,17 @@ def _ticker_map() -> dict[str, int]:
 
 
 def get_cik(ticker: str) -> int | None:
-    base = ticker.upper().split(".")[0]
+    """SEC 티커맵 조회. SEC는 클래스 주식을 'BRK-B'(하이픈)로 등재한다.
+
+    점 표기·접미사·구분자 제거 순으로 시도 — split('.')만 쓰면 'BRK.B'가
+    'BRK'로 잘려 조회에 실패한다."""
     m = _ticker_map()
-    if base in m:
-        return m[base]
-    return m.get(base.replace("-", ""))     # BRK-B → BRKB 형태 보정
+    tu = ticker.upper()
+    for cand in (tu, tu.replace(".", "-"), tu.split(".")[0],
+                 tu.replace("-", "").replace(".", "")):
+        if cand and cand in m:
+            return m[cand]
+    return None
 
 
 # ── XBRL 파싱 ───────────────────────────────────────────────────────────────
